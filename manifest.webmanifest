@@ -1,0 +1,14 @@
+{
+  "name": "ミーグリ・握手会 スケジュール管理",
+  "short_name": "ミーグリ管理",
+  "description": "乃木坂46のミーグリ/握手会の応募・当選・受付締切・部別当選率を管理",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#12121c",
+  "theme_color": "#1a1a2e",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "./icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

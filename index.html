@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ミーグリ管理">
+<meta name="theme-color" content="#1a1a2e">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icon-180.png">
+<title>ミーグリ・握手会 スケジュール管理</title>
+<style>
+  :root{
+    --bg:#12121c; --bg2:#1a1a2a; --card:#1f1f30; --card2:#26263a;
+    --line:#33334a; --line2:#44445f;
+    --txt:#ececf5; --txt2:#a6a6bf; --txt3:#6e6e8a;
+    --acc:#c9a84a;            /* 乃木坂ゴールド系アクセント */
+    --acc-d:#9c7f2c;
+    --ok:#4fb286; --okbg:#16332a;
+    --warn:#e0a93b; --warnbg:#3a2e15;
+    --danger:#e2585a; --dangerbg:#3a1a1c;
+    --info:#5b8fd4; --infobg:#16263a;
+    --r:14px; --r2:10px;
+    --mono:"SF Mono",ui-monospace,"Roboto Mono",Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN","Hiragino Sans","Noto Sans JP",sans-serif;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0}
+  body{
+    font-family:var(--sans); background:var(--bg); color:var(--txt);
+    font-size:15px; line-height:1.6; -webkit-font-smoothing:antialiased;
+    padding-bottom:calc(72px + env(safe-area-inset-bottom));
+    min-height:100vh;
+  }
+  h1,h2,h3{font-weight:600;margin:0}
+  button{font-family:inherit;cursor:pointer}
+  input,select{font-family:inherit}
+  a{color:var(--info)}
+
+  /* ---------- レイアウト ---------- */
+  .wrap{max-width:760px;margin:0 auto;padding:0 16px}
+  header.appbar{
+    position:sticky;top:0;z-index:30;background:rgba(18,18,28,.86);
+    backdrop-filter:saturate(140%) blur(12px);
+    border-bottom:1px solid var(--line);
+    padding:calc(env(safe-area-inset-top) + 10px) 0 10px;
+  }
+  .appbar .wrap{display:flex;align-items:center;gap:10px}
+  .brand{font-size:16px;font-weight:700;letter-spacing:.02em;display:flex;align-items:center;gap:8px}
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--acc);box-shadow:0 0 10px var(--acc)}
+  .sync{margin-left:auto;font-size:12px;color:var(--txt3);display:flex;align-items:center;gap:6px}
+  .sync .pip{width:8px;height:8px;border-radius:50%;background:var(--txt3);transition:.3s}
+  .sync.ok .pip{background:var(--ok)} .sync.saving .pip{background:var(--warn)} .sync.err .pip{background:var(--danger)}
+
+  main{padding-top:18px}
+  section.tab{display:none;animation:fade .25s ease}
+  section.tab.active{display:block}
+  @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+  /* ---------- ボトムナビ ---------- */
+  nav.bottomnav{
+    position:fixed;left:0;right:0;bottom:0;z-index:40;
+    background:rgba(20,20,32,.94);backdrop-filter:blur(14px);
+    border-top:1px solid var(--line);
+    display:flex;justify-content:space-around;
+    padding:8px 6px calc(8px + env(safe-area-inset-bottom));
+  }
+  nav.bottomnav button{
+    background:none;border:none;color:var(--txt3);
+    display:flex;flex-direction:column;align-items:center;gap:3px;
+    font-size:11px;padding:4px 10px;border-radius:10px;transition:.2s;min-width:60px;
+  }
+  nav.bottomnav button .ic{font-size:21px;line-height:1}
+  nav.bottomnav button.active{color:var(--acc)}
+  nav.bottomnav button.active .ic{transform:translateY(-1px)}
+
+  /* ---------- カード/共通 ---------- */
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px;margin-bottom:14px}
+  .card h3{font-size:14px;color:var(--txt2);font-weight:600;margin-bottom:12px;letter-spacing:.03em;text-transform:uppercase}
+  .muted{color:var(--txt2)} .dim{color:var(--txt3)}
+  .row{display:flex;align-items:center;gap:10px}
+  .grow{flex:1}
+  .pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px}
+  .pill.open{background:var(--okbg);color:var(--ok)}
+  .pill.close{background:var(--dangerbg);color:var(--danger)}
+  .pill.info{background:var(--infobg);color:var(--info)}
+  .pill.gold{background:#332a12;color:var(--acc)}
+  .btn{background:var(--card2);border:1px solid var(--line2);color:var(--txt);padding:9px 14px;border-radius:var(--r2);font-size:14px;font-weight:500;transition:.15s}
+  .btn:hover{background:#30304a}
+  .btn:active{transform:scale(.97)}
+  .btn.primary{background:var(--acc);border-color:var(--acc);color:#1a1505;font-weight:700}
+  .btn.primary:hover{background:#d6b657}
+  .btn.ghost{background:none;border-color:var(--line)}
+  .btn.sm{padding:6px 10px;font-size:13px}
+  .btn.danger{color:var(--danger);border-color:#5a2c2e}
+  .btn:disabled{opacity:.4;pointer-events:none}
+  input[type=text],input[type=number],input[type=date],input[type=time],input[type=email],input[type=password],select{
+    background:var(--bg2);border:1px solid var(--line2);color:var(--txt);
+    border-radius:var(--r2);padding:9px 11px;font-size:15px;width:100%;
+  }
+  input:focus,select:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px rgba(201,168,74,.15)}
+  label.fld{display:block;font-size:12px;color:var(--txt2);margin:0 0 5px 2px}
+  .field{margin-bottom:12px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+  table{width:100%;border-collapse:collapse}
+  .toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:#000;color:#fff;
+    padding:10px 18px;border-radius:24px;font-size:13px;z-index:100;opacity:0;transition:.3s;pointer-events:none;border:1px solid var(--line2)}
+  .toast.show{opacity:1}
+  .empty{text-align:center;color:var(--txt3);padding:34px 10px;font-size:14px}
+  .empty .big{font-size:30px;display:block;margin-bottom:8px;opacity:.6}
+  hr.sep{border:none;border-top:1px solid var(--line);margin:14px 0}
+</style>
+</head>
+<body>
+<!-- ====== ここから本体。続きのスクリプトで中身を組み立てます ====== -->
+<div id="app"></div>
+<div class="toast" id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script>
+/* =========================================================================
+   ★ ここに Supabase の設定を貼ってください ★
+   Supabase ダッシュボード → Project Settings → API から取得:
+     - Project URL      → SUPA_URL
+     - anon public key  → SUPA_KEY  (publishable。RLS があるので露出OK)
+   ========================================================================= */
+const SUPA_URL = "https://uoqhcxhwnjmddtfjkpbt.supabase.co";
+const SUPA_KEY = "sb_publishable_ePJplPhM1ln-49AP3DMLlg_B82-JzXr";
+</script>
+<script>
+"use strict";
+/* =========================================================================
+   ミーグリ・握手会 スケジュール管理  —  単一ファイル・クラウド同期アプリ
+   設計思想メモ準拠: クラウド先行 / RLS / JSONバックアップ / 過剰設計回避
+   ========================================================================= */
+
+/* ---------- 部スケジュール・テンプレート ---------------------------------
+   各 type は { bu, dur, restAfter[], firstStart } で表現。
+   restAfter[i] = i部の後の休憩(分)。受付は開始15分前〜終了15分前。   */
+const RECEIPT_BEFORE = 15;   // 受付開始: 開始の何分前
+const RECEIPT_CUT    = 15;   // 受付締切: 終了の何分前
+const TEMPLATES = {
+  kojin_online: {
+    label:"個別オンラインミーグリ (5部)", group:"乃木坂46",
+    bu:5, dur:90, firstStart:"10:00", restAfter:[30,60,30,30], venue:"俺ん家", online:true
+  },
+  kojin_akushu: {
+    label:"個別握手会 (5部・従来)", group:"乃木坂46",
+    bu:5, dur:90, firstStart:"10:00", restAfter:[30,60,30,30], venue:"", online:false
+  },
+  zenkoku_online: {
+    label:"全国オンラインミーグリ (4部)", group:"乃木坂46",
+    bu:4, dur:60, firstStart:"12:00", restAfter:[30,30,30], venue:"俺ん家", online:true
+  },
+  real_meetgreet: {
+    label:"リアルミーグリ (4部)", group:"乃木坂46",
+    bu:4, dur:60, firstStart:"12:00", restAfter:[30,30,30], venue:"", online:false
+  },
+  custom: {
+    label:"カスタム (自由設定)", group:"乃木坂46",
+    bu:3, dur:60, firstStart:"12:00", restAfter:[30,30], venue:"", online:false
+  }
+};
+
+/* ---------- 時刻ユーティリティ ---------- */
+const pad=n=>String(n).padStart(2,"0");
+const toMin=t=>{ if(!t) return 0; const[h,m]=t.split(":").map(Number); return h*60+m; };
+const toHM =m=>`${pad(Math.floor(m/60)%24)}:${pad(((m%60)+60)%60)}`;
+function buildSchedule(tpl){
+  // returns [{bu_no,start_time,end_time,receipt_open,receipt_close}]
+  const out=[]; let s=toMin(tpl.firstStart);
+  for(let i=0;i<tpl.bu;i++){
+    const e=s+tpl.dur;
+    out.push({
+      bu_no:i+1,
+      start_time:toHM(s)+":00",
+      end_time:toHM(e)+":00",
+      receipt_open:toHM(s-RECEIPT_BEFORE)+":00",
+      receipt_close:toHM(e-RECEIPT_CUT)+":00",
+      topic:null
+    });
+    if(i<tpl.bu-1) s = e + (tpl.restAfter[i]??30);
+  }
+  return out;
+}
+const EVENT_TYPE_LABEL={
+  kojin_online:"個別オンライン", kojin_akushu:"個別握手会",
+  zenkoku_online:"全国オンライン", real_meetgreet:"リアルミーグリ", custom:"カスタム"
+};
+
+/* ---------- グローバル状態 ---------- */
+let sb=null, USER=null;
+const DB={ groups:[],members:[],releases:[],events:[],sessions:[],applications:[],allocations:[] };
+let SETTINGS={ yearGoal:0 };
+let activeTab="home";
+let selectedReleaseId=null, selectedEventId=null;
+
+/* ---------- 同期ステータス ---------- */
+function setSync(state,txt){
+  const el=document.getElementById("syncBadge"); if(!el) return;
+  el.className="sync "+(state||"");
+  el.querySelector(".lbl").textContent=txt||({ok:"同期済み",saving:"保存中…",err:"エラー"}[state]||"—");
+}
+function toast(msg){
+  const t=document.getElementById("toast");
+  t.textContent=msg; t.classList.add("show");
+  clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove("show"),2200);
+}
+
+/* ---------- テーブル名プレフィックス -----------------------------------
+   家計簿プロジェクトと同じDBに同居するため、本ツールのテーブルは mg_ 接頭。
+   ローカルの DB オブジェクトのキーは接頭なしのまま、Supabase送信時のみ付与。 */
+const TBL_PREFIX="mg_";
+const tbl=name=>TBL_PREFIX+name;
+
+/* ---------- データ取得(開いた時に読み込む方式) ---------- */
+async function loadAll(){
+  setSync("saving","読込中…");
+  const tables=["groups","members","releases","events","sessions","applications","allocations"];
+  for(const t of tables){
+    const {data,error}=await sb.from(tbl(t)).select("*");
+    if(error){ console.error(t,error); setSync("err"); toast("読込失敗: "+t); return false; }
+    DB[t]=data||[];
+  }
+  const {data:st}=await sb.from(tbl("app_settings")).select("data").eq("user_id",USER.id).maybeSingle();
+  if(st&&st.data) SETTINGS=Object.assign({yearGoal:0},st.data);
+  setSync("ok"); 
+  return true;
+}
+
+/* ---------- 汎用 upsert / insert / delete(楽観的更新は呼び出し側) ----------
+   呼び出し側は接頭なしの論理名("events"等)を渡す。ここで mg_ を付ける。 */
+async function dbInsert(table,row){
+  row.user_id=USER.id;
+  const {data,error}=await sb.from(tbl(table)).insert(row).select().single();
+  if(error){ setSync("err"); toast("保存失敗"); throw error; }
+  setSync("ok"); return data;
+}
+async function dbUpdate(table,id,patch){
+  setSync("saving");
+  const {data,error}=await sb.from(tbl(table)).update(patch).eq("id",id).select().single();
+  if(error){ setSync("err"); toast("更新失敗"); throw error; }
+  setSync("ok"); return data;
+}
+async function dbDelete(table,id){
+  setSync("saving");
+  const {error}=await sb.from(tbl(table)).delete().eq("id",id);
+  if(error){ setSync("err"); toast("削除失敗"); throw error; }
+  setSync("ok");
+}
+async function saveSettings(){
+  setSync("saving");
+  await sb.from(tbl("app_settings")).upsert({user_id:USER.id,data:SETTINGS,updated_at:new Date().toISOString()});
+  setSync("ok");
+}
+
+/* ---------- 派生ヘルパ ---------- */
+const byId=(arr,id)=>arr.find(x=>x.id===id);
+const sessionsOf=eid=>DB.sessions.filter(s=>s.event_id===eid).sort((a,b)=>a.bu_no-b.bu_no);
+const appsOf=sid=>DB.applications.filter(a=>a.session_id===sid);
+const allocsOf=sid=>DB.allocations.filter(a=>a.session_id===sid);
+const eventsOf=rid=>DB.events.filter(e=>e.release_id===rid).sort((a,b)=>(a.event_date>b.event_date?1:-1));
+function memberName(id){ const m=byId(DB.members,id); return m?m.name:"?"; }
+function releaseLabel(id){ const r=byId(DB.releases,id); return r?r.label:"?"; }
+function eventTitle(e){
+  const r=byId(DB.releases,e.release_id);
+  return `${r?r.label:""} / ${e.event_date} ${EVENT_TYPE_LABEL[e.event_type]||""}`;
+}
+
+/* === 続きの描画ロジックは次の追記で === */
+
+/* =========================================================================
+   描画レイヤ
+   ========================================================================= */
+const $=sel=>document.querySelector(sel);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+/* ---------- ログイン画面 ---------- */
+function renderAuth(){
+  $("#app").innerHTML=`
+  <div class="wrap" style="max-width:420px;padding-top:14vh">
+    <div class="brand" style="font-size:20px;justify-content:center;margin-bottom:6px">
+      <span class="dot"></span> ミーグリ・握手会 管理
+    </div>
+    <p class="dim" style="text-align:center;margin:0 0 26px">クロスプラットフォーム同期 (Supabase)</p>
+    <div class="card">
+      <div class="field"><label class="fld">メールアドレス</label>
+        <input type="email" id="authEmail" autocomplete="username" placeholder="you@example.com"></div>
+      <div class="field"><label class="fld">パスワード</label>
+        <input type="password" id="authPw" autocomplete="current-password" placeholder="••••••••"></div>
+      <div class="row" style="gap:8px;margin-top:6px">
+        <button class="btn primary grow" onclick="doAuth('in')">ログイン</button>
+        <button class="btn ghost grow" onclick="doAuth('up')">新規登録</button>
+      </div>
+      <p class="dim" id="authMsg" style="font-size:12px;margin:12px 0 0;min-height:16px"></p>
+    </div>
+    <p class="dim" style="font-size:11px;text-align:center;line-height:1.7">
+      初回は「新規登録」→ メール認証後ログイン。<br>
+      URL/キー未設定なら index.html 冒頭を確認してください。
+    </p>
+  </div>`;
+}
+async function doAuth(mode){
+  const email=$("#authEmail").value.trim(), pw=$("#authPw").value;
+  const msg=$("#authMsg");
+  if(!email||!pw){ msg.textContent="メールとパスワードを入力してください。"; return; }
+  msg.textContent="処理中…";
+  try{
+    const fn = mode==="up" ? sb.auth.signUp({email,password:pw})
+                           : sb.auth.signInWithPassword({email,password:pw});
+    const {data,error}=await fn;
+    if(error){ msg.textContent="⚠ "+error.message; return; }
+    if(mode==="up" && !data.session){ msg.textContent="✉ 確認メールを送信しました。認証後にログインしてください。"; return; }
+    await boot();
+  }catch(e){ msg.textContent="⚠ "+e.message; }
+}
+
+/* ---------- アプリ・シェル ---------- */
+function renderShell(){
+  $("#app").innerHTML=`
+  <header class="appbar"><div class="wrap">
+    <div class="brand"><span class="dot"></span> ミーグリ管理</div>
+    <div class="sync ok" id="syncBadge"><span class="pip"></span><span class="lbl">同期済み</span></div>
+  </div></header>
+  <main><div class="wrap">
+    <section class="tab" id="tab-home"></section>
+    <section class="tab" id="tab-events"></section>
+    <section class="tab" id="tab-stats"></section>
+    <section class="tab" id="tab-sim"></section>
+  </div></main>
+  <nav class="bottomnav">
+    ${navBtn("home","今日","\u23F0")}
+    ${navBtn("events","記録","\u{1F4CB}")}
+    ${navBtn("stats","当選率","\u{1F4CA}")}
+    ${navBtn("sim","応募計算","\u{1F3AF}")}
+  </nav>`;
+  switchTab(activeTab);
+}
+function navBtn(id,label,ic){
+  return `<button data-tab="${id}" onclick="switchTab('${id}')">
+    <span class="ic">${ic}</span><span>${label}</span></button>`;
+}
+function switchTab(id){
+  activeTab=id;
+  document.querySelectorAll(".tab").forEach(s=>s.classList.toggle("active",s.id==="tab-"+id));
+  document.querySelectorAll(".bottomnav button").forEach(b=>b.classList.toggle("active",b.dataset.tab===id));
+  ({home:renderHome,events:renderEvents,stats:renderStats,sim:renderSim}[id])();
+}
+
+/* =========================================================================
+   TAB 1: 今日 / カウントダウン
+   ========================================================================= */
+let countdownTimer=null;
+function renderHome(){
+  const el=$("#tab-home");
+  const today=new Date(); const ymd=`${today.getFullYear()}-${pad(today.getMonth()+1)}-${pad(today.getDate())}`;
+
+  // 今日参加する部(当選>0)を抽出
+  const todayEvents=DB.events.filter(e=>e.event_date===ymd);
+  let todaySessions=[];
+  todayEvents.forEach(e=>{
+    sessionsOf(e.id).forEach(s=>{
+      const won=allocsOf(s.id).reduce((n,a)=>n+(a.won||0),0);
+      if(won>0) todaySessions.push({e,s,won});
+    });
+  });
+  todaySessions.sort((a,b)=>toMin(a.s.receipt_close)-toMin(b.s.receipt_close));
+
+  // 今後の応募/開催の締切タイムライン(開催日基準・未来分)
+  const upcoming=DB.events
+    .filter(e=>e.event_date>=ymd)
+    .sort((a,b)=>a.event_date>b.event_date?1:-1).slice(0,8);
+
+  let html=`<div style="height:6px"></div>`;
+
+  // --- カウントダウン主役 ---
+  if(todaySessions.length){
+    html+=`<div class="card" style="border-color:var(--acc-d);background:linear-gradient(180deg,#241f10,var(--card))">
+      <h3 style="color:var(--acc)">本日の受付締切</h3>
+      <div id="cdList"></div>
+      <p class="dim" style="font-size:11px;margin:10px 0 0">締切を過ぎると参加できません。各部 終了15分前が締切です。</p>
+    </div>`;
+  }else{
+    html+=`<div class="card">
+      <h3>本日の予定</h3>
+      <div class="empty"><span class="big">\u2615</span>今日の参加予定(当選)はありません。<br>「記録」タブで当選を入力すると、ここに受付締切カウントダウンが出ます。</div>
+    </div>`;
+  }
+
+  // --- 直近の開催タイムライン ---
+  html+=`<div class="card"><h3>直近の開催</h3>`;
+  if(!upcoming.length){
+    html+=`<div class="empty"><span class="big">\u{1F5D3}\uFE0F</span>予定がありません。「記録」から追加してください。</div>`;
+  }else{
+    html+=upcoming.map(e=>{
+      const ss=sessionsOf(e.id);
+      const won=ss.reduce((n,s)=>n+allocsOf(s.id).reduce((m,a)=>m+(a.won||0),0),0);
+      const dleft=daysLeft(e.event_date);
+      const dpill = dleft===0?`<span class="pill close">本日</span>`
+                  : dleft>0?`<span class="pill info">あと${dleft}日</span>`:"";
+      return `<div class="row" style="padding:9px 0;border-bottom:1px solid var(--line);cursor:pointer"
+                   onclick="openEvent('${e.id}')">
+        <div class="grow">
+          <div style="font-weight:600">${esc(e.event_date)} <span class="dim" style="font-weight:400">${EVENT_TYPE_LABEL[e.event_type]||""}</span></div>
+          <div class="dim" style="font-size:12px">${esc(releaseLabel(e.release_id))} ・ ${esc(e.venue||"")} ${won?`・ 当選 ${won}枚`:""}</div>
+        </div>${dpill}
+      </div>`;
+    }).join("");
+  }
+  html+=`</div>`;
+
+  // --- 年間サマリ ---
+  const stat=yearStats(today.getFullYear());
+  html+=`<div class="card"><h3>${today.getFullYear()}年 サマリ</h3>
+    <div class="grid3">
+      ${miniStat("参加(当選)枚数",stat.won+"枚")}
+      ${miniStat("開催数",stat.events+"件")}
+      ${miniStat("応募 当選率",stat.rate)}
+    </div></div>`;
+
+  // --- 設定/バックアップ ---
+  html+=`<div class="card"><h3>設定・バックアップ</h3>
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <button class="btn sm ghost" onclick="exportJSON()">\u{1F4E5} JSONバックアップ</button>
+      <button class="btn sm ghost" onclick="logout()" style="margin-left:auto">ログアウト</button>
+    </div>
+    <p class="dim" style="font-size:11px;margin:10px 0 0">データはSupabaseに自動保存。別端末では同じアカウントでログイン→再読み込みで最新が反映されます。</p>
+  </div>`;
+
+  el.innerHTML=html;
+  if(todaySessions.length) startCountdown(todaySessions);
+}
+
+function miniStat(label,val){
+  return `<div style="background:var(--bg2);border-radius:10px;padding:11px">
+    <div class="dim" style="font-size:11px">${label}</div>
+    <div style="font-size:19px;font-weight:700;margin-top:2px">${val}</div></div>`;
+}
+function daysLeft(ymd){
+  const t=new Date(); t.setHours(0,0,0,0);
+  const d=new Date(ymd+"T00:00:00");
+  return Math.round((d-t)/86400000);
+}
+function yearStats(year){
+  let won=0,events=0,applied=0,awon=0;
+  DB.events.forEach(e=>{
+    if(!e.event_date.startsWith(year+"-")) return;
+    events++;
+    sessionsOf(e.id).forEach(s=>{
+      allocsOf(s.id).forEach(a=>won+=(a.won||0));
+      appsOf(s.id).forEach(ap=>{applied+=ap.applied||0;awon+=ap.won||0;});
+    });
+  });
+  return {won,events,rate:applied?Math.round(awon/applied*100)+"%":"—"};
+}
+function startCountdown(list){
+  if(countdownTimer) clearInterval(countdownTimer);
+  const tick=()=>{
+    const box=$("#cdList"); if(!box){clearInterval(countdownTimer);return;}
+    const now=new Date(); const nowMin=now.getHours()*60+now.getMinutes()+now.getSeconds()/60;
+    box.innerHTML=list.map(({e,s,won})=>{
+      const cut=toMin(s.receipt_close);
+      const diff=cut-nowMin;
+      let cls="info",txt="";
+      if(diff<=0){ cls="close"; txt="締切終了"; }
+      else { const h=Math.floor(diff/60),m=Math.floor(diff%60),sec=Math.floor((diff*60)%60);
+        txt=`${h>0?h+"時間":""}${pad(m)}分${pad(sec)}秒`; if(diff<=30) cls="close"; else if(diff<=60) cls="open"; }
+      return `<div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+        <div class="grow">
+          <div style="font-weight:600">${s.bu_no}部 <span class="dim" style="font-weight:400">${s.start_time.slice(0,5)}–${s.end_time.slice(0,5)}</span></div>
+          <div class="dim" style="font-size:12px">締切 ${s.receipt_close.slice(0,5)} ・ ${esc(memberWonStr(s.id))} ・ 当選${won}枚</div>
+        </div>
+        <div style="text-align:right">
+          <div class="pill ${cls}" style="font-variant-numeric:tabular-nums;font-size:14px;padding:5px 11px">${txt}</div>
+        </div></div>`;
+    }).join("");
+  };
+  tick(); countdownTimer=setInterval(tick,1000);
+}
+function memberWonStr(sid){
+  const a=allocsOf(sid).filter(x=>x.won>0).map(x=>`${memberName(x.member_id)}${x.won}`);
+  return a.join(" ")||"—";
+}
+
+/* === 続き(記録/当選率/応募計算タブ)は次の追記で === */
+
+/* =========================================================================
+   TAB 2: 記録 (リリース → イベント → 部別 申請/当選/メンバー)
+   ========================================================================= */
+function renderEvents(){
+  const el=$("#tab-events");
+  if(selectedEventId && byId(DB.events,selectedEventId)){ renderEventDetail(el); return; }
+
+  let html=`<div class="row" style="margin:6px 0 14px">
+    <h2 style="font-size:19px">記録</h2>
+    <button class="btn primary sm" style="margin-left:auto" onclick="newReleasePrompt()">＋ リリース</button>
+  </div>`;
+
+  const groups=DB.groups.sort((a,b)=>a.sort_order-b.sort_order);
+  const rels=DB.releases.sort((a,b)=>(b.release_date||"")>(a.release_date||"")?1:-1);
+
+  if(!rels.length){
+    html+=`<div class="card"><div class="empty"><span class="big">\u{1F4BF}</span>
+      まだリリースがありません。<br>右上の「＋ リリース」から 41st Single などを追加してください。</div></div>`;
+  }
+  rels.forEach(r=>{
+    const evs=eventsOf(r.id);
+    const totalWon=evs.reduce((n,e)=>n+sessionsOf(e.id).reduce((m,s)=>m+allocsOf(s.id).reduce((k,a)=>k+(a.won||0),0),0),0);
+    html+=`<div class="card">
+      <div class="row">
+        <div class="grow">
+          <h3 style="text-transform:none;color:var(--txt);font-size:16px;margin-bottom:2px">${esc(r.label)}</h3>
+          <div class="dim" style="font-size:12px">${esc(byId(DB.groups,r.group_id)?.name||"")} ${r.release_date?"・ "+r.release_date:""} ・ 当選計 ${totalWon}枚</div>
+        </div>
+        <button class="btn sm ghost" onclick="newEventPrompt('${r.id}')">＋ 開催日</button>
+      </div>`;
+    if(evs.length){
+      html+=`<hr class="sep">`+evs.map(e=>{
+        const won=sessionsOf(e.id).reduce((m,s)=>m+allocsOf(s.id).reduce((k,a)=>k+(a.won||0),0),0);
+        return `<div class="row" style="padding:8px 0;cursor:pointer" onclick="openEvent('${e.id}')">
+          <div class="grow">
+            <span style="font-weight:600">${esc(e.event_date)}</span>
+            <span class="pill gold" style="margin-left:6px">${EVENT_TYPE_LABEL[e.event_type]}</span>
+          </div>
+          <span class="dim" style="font-size:12px">${esc(e.venue||"")} ${won?`・${won}枚`:""}</span>
+          <span class="dim" style="margin-left:8px">\u203A</span>
+        </div>`;
+      }).join("");
+    }
+    html+=`<div style="margin-top:8px"><button class="btn sm ghost danger" onclick="delRelease('${r.id}')">リリース削除</button></div>`;
+    html+=`</div>`;
+  });
+  el.innerHTML=html;
+}
+
+function newReleasePrompt(){
+  const g=DB.groups.sort((a,b)=>a.sort_order-b.sort_order);
+  openModal(`新規リリース`,`
+    <div class="field"><label class="fld">グループ</label>
+      <select id="m_group">${g.map(x=>`<option value="${x.id}" ${x.name==="乃木坂46"?"selected":""}>${esc(x.name)}</option>`).join("")}</select></div>
+    <div class="field"><label class="fld">ラベル(例: 41st Single / 4th Album)</label>
+      <input type="text" id="m_label" placeholder="41st Single"></div>
+    <div class="field"><label class="fld">発売日(任意)</label>
+      <input type="date" id="m_date"></div>
+  `,async()=>{
+    const label=$("#m_label").value.trim(); if(!label){toast("ラベルを入力してください");return false;}
+    const row=await dbInsert("releases",{group_id:$("#m_group").value,label,release_date:$("#m_date").value||null,sort_order:DB.releases.length});
+    DB.releases.push(row); toast("リリースを追加しました"); return true;
+  });
+}
+
+function newEventPrompt(rid){
+  openModal(`開催日を追加`,`
+    <div class="field"><label class="fld">種別(選ぶと部スケジュール自動生成)</label>
+      <select id="m_type" onchange="previewSched()">
+        ${Object.entries(TEMPLATES).map(([k,t])=>`<option value="${k}">${esc(t.label)}</option>`).join("")}</select></div>
+    <div class="grid2">
+      <div class="field"><label class="fld">開催日</label><input type="date" id="m_edate"></div>
+      <div class="field"><label class="fld">会場(俺ん家=オンライン)</label><input type="text" id="m_venue" value="俺ん家"></div>
+    </div>
+    <div class="field"><label class="fld">部スケジュール プレビュー(後で個別編集可)</label>
+      <div id="m_sched" style="background:var(--bg2);border:1px solid var(--line2);border-radius:10px;padding:10px;font-size:13px"></div></div>
+  `,async()=>{
+    const edate=$("#m_edate").value; if(!edate){toast("開催日を選択してください");return false;}
+    const type=$("#m_type").value, tpl=TEMPLATES[type];
+    const ev=await dbInsert("events",{release_id:rid,event_date:edate,event_type:type,venue:$("#m_venue").value||""});
+    DB.events.push(ev);
+    for(const s of buildSchedule(tpl)){
+      const srow=await dbInsert("sessions",Object.assign({event_id:ev.id},s));
+      DB.sessions.push(srow);
+    }
+    toast("開催日と部を作成しました"); selectedEventId=ev.id; return true;
+  });
+  setTimeout(()=>{ const t=$("#m_type"); if(t){ t.value="kojin_online"; previewSched(); } },30);
+}
+function previewSched(){
+  const tpl=TEMPLATES[$("#m_type").value]; const box=$("#m_sched"); if(!box) return;
+  const v=$("#m_venue"); if(v && tpl.online && v.value==="") v.value="俺ん家";
+  box.innerHTML=buildSchedule(tpl).map(s=>
+    `<div class="row" style="padding:3px 0"><span style="width:40px;font-weight:600">${s.bu_no}部</span>
+     <span class="grow">${s.start_time.slice(0,5)}–${s.end_time.slice(0,5)}</span>
+     <span class="pill close" style="font-size:10px">締切 ${s.receipt_close.slice(0,5)}</span></div>`).join("");
+}
+
+function openEvent(id){ selectedEventId=id; switchTab("events"); }
+
+/* ---------- イベント詳細(部ごとの入力) ---------- */
+function renderEventDetail(el){
+  const e=byId(DB.events,selectedEventId);
+  const ss=sessionsOf(e.id);
+  const mem=DB.members.filter(m=>m.group_id===byId(DB.releases,e.release_id)?.group_id);
+  const rounds=[...new Set(DB.applications.filter(a=>ss.some(s=>s.id===a.session_id)).map(a=>a.round))];
+  if(!rounds.length) rounds.push(1);
+
+  let html=`<div class="row" style="margin:6px 0 14px">
+    <button class="btn sm ghost" onclick="selectedEventId=null;renderEvents()">\u2039 一覧</button>
+    <h2 style="font-size:17px;margin-left:6px">${esc(e.event_date)} ${EVENT_TYPE_LABEL[e.event_type]}</h2>
+  </div>`;
+
+  html+=`<div class="card"><div class="row">
+    <div class="grow"><div class="dim" style="font-size:12px">${esc(releaseLabel(e.release_id))}</div>
+    <div style="font-weight:600">${esc(e.venue||"")}</div></div>
+    <button class="btn sm ghost danger" onclick="delEvent('${e.id}')">削除</button>
+  </div></div>`;
+
+  // 部ごとカード
+  ss.forEach(s=>{
+    const apps=appsOf(s.id).sort((a,b)=>a.round-b.round);
+    const allocs=allocsOf(s.id);
+    const wonTotal=allocs.reduce((n,a)=>n+(a.won||0),0);
+    html+=`<div class="card">
+      <div class="row">
+        <h3 style="text-transform:none;color:var(--txt);font-size:15px">${s.bu_no}部
+          <span class="dim" style="font-weight:400;font-size:13px">${s.start_time.slice(0,5)}–${s.end_time.slice(0,5)}</span></h3>
+        <span class="pill close" style="margin-left:auto">締切 ${s.receipt_close.slice(0,5)}</span>
+      </div>
+      <div class="row" style="gap:6px;margin:8px 0">
+        <input type="text" value="${esc(s.topic||"")}" placeholder="トークメモ(例: 乃木恋 / 誕生日)"
+          onchange="updTopic('${s.id}',this.value)" style="font-size:13px;padding:7px 9px">
+        <button class="btn sm ghost" onclick="editTimes('${s.id}')">時刻編集</button>
+      </div>
+
+      <div style="font-size:12px;color:var(--txt2);margin:10px 0 4px">応募 / 当選 (回次別)</div>
+      <table style="font-size:13px"><tr class="dim" style="font-size:11px">
+        <td>回次</td><td style="text-align:center">申請</td><td style="text-align:center">当選</td><td style="text-align:center">当選率</td><td></td></tr>
+        ${apps.map(a=>`<tr>
+          <td style="padding:4px 0">${a.round}次</td>
+          <td style="text-align:center"><input type="number" min="0" value="${a.applied}" style="width:64px;text-align:center;padding:5px"
+              onchange="updApp('${a.id}','applied',this.value)"></td>
+          <td style="text-align:center"><input type="number" min="0" value="${a.won}" style="width:64px;text-align:center;padding:5px"
+              onchange="updApp('${a.id}','won',this.value)"></td>
+          <td style="text-align:center;font-weight:600;color:${a.applied?(a.won/a.applied>=.5?'var(--ok)':a.won/a.applied>=.3?'var(--warn)':'var(--danger)'):'var(--txt3)'}">
+            ${a.applied?Math.round(a.won/a.applied*100)+"%":"—"}</td>
+          <td style="text-align:right"><button class="btn sm ghost danger" style="padding:3px 7px" onclick="delApp('${a.id}')">×</button></td>
+        </tr>`).join("")}
+      </table>
+      <button class="btn sm ghost" style="margin-top:6px" onclick="addApp('${s.id}')">＋ 回次を追加</button>
+
+      <div style="font-size:12px;color:var(--txt2);margin:14px 0 4px">メンバー別 当選枚数 ${wonTotal?`(計${wonTotal})`:""}</div>
+      <div id="alloc-${s.id}">${allocRows(s.id,mem)}</div>
+    </div>`;
+  });
+
+  el.innerHTML=html;
+}
+function allocRows(sid,mem){
+  const allocs=allocsOf(sid);
+  let h=allocs.map(a=>`<div class="row" style="padding:4px 0">
+      <span class="grow">${esc(memberName(a.member_id))}</span>
+      <input type="number" min="0" value="${a.won}" style="width:74px;text-align:center;padding:5px"
+        onchange="updAlloc('${a.id}',this.value)">
+      <button class="btn sm ghost danger" style="padding:3px 7px;margin-left:6px" onclick="delAlloc('${a.id}','${sid}')">×</button>
+    </div>`).join("");
+  const used=allocs.map(a=>a.member_id);
+  const avail=mem.filter(m=>!used.includes(m.id));
+  h+=`<div class="row" style="margin-top:6px;gap:6px">
+    <select id="addmem-${sid}" style="font-size:13px">
+      ${avail.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join("")}
+      <option value="__new">＋ 新しいメンバー…</option>
+    </select>
+    <button class="btn sm" onclick="addAlloc('${sid}')">追加</button></div>`;
+  return h;
+}
+
+/* === 続き(更新ハンドラ/当選率/応募計算)は次の追記で === */
+
+/* ---------- 入力ハンドラ(楽観的更新) ---------- */
+async function updTopic(sid,v){ const s=byId(DB.sessions,sid); s.topic=v; await dbUpdate("sessions",sid,{topic:v}); }
+async function updApp(id,field,v){ const a=byId(DB.applications,id); a[field]=+v||0; renderEvents();
+  await dbUpdate("applications",id,{[field]:+v||0}); }
+async function addApp(sid){
+  const ex=appsOf(sid).map(a=>a.round); let r=1; while(ex.includes(r)) r++;
+  const row=await dbInsert("applications",{session_id:sid,round:r,applied:0,won:0});
+  DB.applications.push(row); renderEvents();
+}
+async function delApp(id){ DB.applications=DB.applications.filter(a=>a.id!==id); renderEvents(); await dbDelete("applications",id); }
+
+async function updAlloc(id,v){ const a=byId(DB.allocations,id); a.won=+v||0; renderEvents();
+  await dbUpdate("allocations",id,{won:+v||0}); }
+async function delAlloc(id){ DB.allocations=DB.allocations.filter(a=>a.id!==id); renderEvents(); await dbDelete("allocations",id); }
+async function addAlloc(sid){
+  const sel=$("#addmem-"+sid); let mid=sel.value;
+  if(mid==="__new"){
+    const name=prompt("メンバー名を入力(例: 賀喜遥香)"); if(!name) return;
+    const gid=byId(DB.releases, byId(DB.events,selectedEventId).release_id).group_id;
+    const m=await dbInsert("members",{group_id:gid,name:name.trim(),sort_order:DB.members.length});
+    DB.members.push(m); mid=m.id;
+  }
+  if(!mid) return;
+  if(allocsOf(sid).some(a=>a.member_id===mid)){ toast("既に追加済みです"); return; }
+  const row=await dbInsert("allocations",{session_id:sid,member_id:mid,won:0});
+  DB.allocations.push(row); renderEvents();
+}
+function editTimes(sid){
+  const s=byId(DB.sessions,sid);
+  openModal(`${s.bu_no}部 時刻編集`,`
+    <div class="grid2">
+      <div class="field"><label class="fld">開始</label><input type="time" id="t_start" value="${s.start_time.slice(0,5)}"></div>
+      <div class="field"><label class="fld">終了</label><input type="time" id="t_end" value="${s.end_time.slice(0,5)}"></div>
+      <div class="field"><label class="fld">受付開始</label><input type="time" id="t_ro" value="${s.receipt_open?.slice(0,5)||""}"></div>
+      <div class="field"><label class="fld">受付締切</label><input type="time" id="t_rc" value="${s.receipt_close?.slice(0,5)||""}"></div>
+    </div>
+    <p class="dim" style="font-size:11px">空欄のままにすると、開始/終了から15分ルールで自動補完します。</p>
+  `,async()=>{
+    const st=$("#t_start").value, en=$("#t_end").value;
+    const ro=$("#t_ro").value || toHM(toMin(st)-RECEIPT_BEFORE);
+    const rc=$("#t_rc").value || toHM(toMin(en)-RECEIPT_CUT);
+    const patch={start_time:st+":00",end_time:en+":00",receipt_open:ro+":00",receipt_close:rc+":00"};
+    Object.assign(s,patch); await dbUpdate("sessions",sid,patch); renderEvents(); return true;
+  });
+}
+async function delEvent(id){
+  if(!confirm("この開催日と紐づく部・応募・当選をすべて削除します。よろしいですか?")) return;
+  await dbDelete("events",id);
+  DB.events=DB.events.filter(e=>e.id!==id);
+  const sids=DB.sessions.filter(s=>s.event_id===id).map(s=>s.id);
+  DB.sessions=DB.sessions.filter(s=>s.event_id!==id);
+  DB.applications=DB.applications.filter(a=>!sids.includes(a.session_id));
+  DB.allocations=DB.allocations.filter(a=>!sids.includes(a.session_id));
+  selectedEventId=null; renderEvents();
+}
+async function delRelease(id){
+  if(!confirm("このリリースと配下の全データを削除します。よろしいですか?")) return;
+  await dbDelete("releases",id);
+  DB.releases=DB.releases.filter(r=>r.id!==id);
+  DB.events=DB.events.filter(e=>e.release_id!==id);
+  renderEvents();
+}
+
+/* =========================================================================
+   TAB 3: 当選率 統計 (部別 = 時間帯別 の歴代平均)
+   ========================================================================= */
+function renderStats(){
+  const el=$("#tab-stats");
+  // 時間帯(開始時刻)別に 申請/当選 を集計 → 部の有利不利を可視化
+  const byStart={};
+  DB.sessions.forEach(s=>{
+    const ev=byId(DB.events,s.event_id); if(!ev) return;
+    appsOf(s.id).forEach(a=>{
+      const key=s.start_time.slice(0,5);
+      (byStart[key]=byStart[key]||{applied:0,won:0,n:0});
+      byStart[key].applied+=a.applied||0; byStart[key].won+=a.won||0; byStart[key].n++;
+    });
+  });
+  const rows=Object.entries(byStart).map(([t,v])=>({t,...v,rate:v.applied?v.won/v.applied:null}))
+    .filter(r=>r.applied>0).sort((a,b)=>toMin(a.t)-toMin(b.t));
+
+  let html=`<h2 style="font-size:19px;margin:6px 0 14px">歴代 当選率</h2>`;
+
+  if(!rows.length){
+    html+=`<div class="card"><div class="empty"><span class="big">\u{1F4CA}</span>
+      まだ応募データがありません。<br>「記録」で各部の申請・当選を入力すると、時間帯ごとの当選率がここに出ます。</div></div>`;
+    el.innerHTML=html; return;
+  }
+  const best=rows.reduce((a,b)=>(b.rate>a.rate?b:a));
+  html+=`<div class="card" style="border-color:var(--acc-d)">
+    <h3 style="color:var(--acc)">最も当たりやすい時間帯</h3>
+    <div style="font-size:26px;font-weight:700">${best.t} <span style="font-size:16px;color:var(--ok)">${Math.round(best.rate*100)}%</span></div>
+    <div class="dim" style="font-size:12px">同じ応募枚数なら、この時間帯の部が有利な傾向です。</div></div>`;
+
+  const max=Math.max(...rows.map(r=>r.rate));
+  html+=`<div class="card"><h3>時間帯別 当選率</h3>`;
+  rows.forEach(r=>{
+    const pct=Math.round(r.rate*100);
+    const col=r.rate>=.5?'var(--ok)':r.rate>=.3?'var(--warn)':'var(--danger)';
+    html+=`<div style="margin:11px 0">
+      <div class="row" style="font-size:13px;margin-bottom:4px">
+        <span style="font-weight:600;width:52px">${r.t}</span>
+        <span class="dim grow" style="font-size:12px">当選${r.won}/申請${r.applied} ・ ${r.n}部分</span>
+        <span style="font-weight:700;color:${col}">${pct}%</span></div>
+      <div style="height:8px;background:var(--bg2);border-radius:6px;overflow:hidden">
+        <div style="height:100%;width:${(r.rate/max*100).toFixed(0)}%;background:${col};border-radius:6px"></div></div>
+    </div>`;
+  });
+  html+=`</div>`;
+
+  // リリース別 当選率(回次別の素も見える)
+  html+=`<div class="card"><h3>回次別 当選率</h3>`;
+  const byRound={};
+  DB.applications.forEach(a=>{(byRound[a.round]=byRound[a.round]||{applied:0,won:0});byRound[a.round].applied+=a.applied||0;byRound[a.round].won+=a.won||0;});
+  const rr=Object.entries(byRound).filter(([k,v])=>v.applied>0).sort((a,b)=>a[0]-b[0]);
+  if(!rr.length){ html+=`<div class="dim" style="font-size:13px">データなし</div>`; }
+  else rr.forEach(([round,v])=>{
+    const pct=Math.round(v.won/v.applied*100);
+    html+=`<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line)">
+      <span style="font-weight:600;width:52px">${round}次</span>
+      <span class="dim grow" style="font-size:12px">当選${v.won}/申請${v.applied}</span>
+      <span style="font-weight:700">${pct}%</span></div>`;
+  });
+  html+=`</div>`;
+  el.innerHTML=html;
+}
+
+/* =========================================================================
+   TAB 4: 応募計算(シミュレーション)
+   各部に応募枚数を割り振り、歴代当選率から期待当選を試算。
+   ========================================================================= */
+let simState={};
+function renderSim(){
+  const el=$("#tab-sim");
+  // 時間帯別の歴代当選率(統計と同じロジック)
+  const byStart={};
+  DB.sessions.forEach(s=>{
+    appsOf(s.id).forEach(a=>{
+      const k=s.start_time.slice(0,5);(byStart[k]=byStart[k]||{applied:0,won:0});
+      byStart[k].applied+=a.applied||0;byStart[k].won+=a.won||0;});
+  });
+
+  let html=`<h2 style="font-size:19px;margin:6px 0 8px">応募シミュレーション</h2>
+    <p class="dim" style="font-size:13px;margin:0 0 14px">種別を選び、各部に応募枚数を入れると、歴代当選率から期待当選を試算します。</p>`;
+
+  html+=`<div class="card"><div class="row" style="gap:8px">
+    <select id="simType" onchange="simBuild()" class="grow">
+      ${Object.entries(TEMPLATES).filter(([k])=>k!=="custom").map(([k,t])=>`<option value="${k}">${esc(t.label)}</option>`).join("")}</select>
+  </div>
+  <div id="simRows" style="margin-top:12px"></div>
+  <div class="grid3" style="margin-top:14px">
+    ${miniStat("応募 合計","<span id='simApp'>0</span>枚")}
+    ${miniStat("期待当選","<span id='simExp'>0.0</span>枚")}
+    ${miniStat("期待当選率","<span id='simRate'>—</span>")}
+  </div>
+  <p class="dim" style="font-size:11px;margin:10px 0 0">当選率は歴代平均(データが無い時間帯は全体平均で代用)。確率の目安です。</p>
+  </div>`;
+  el.innerHTML=html;
+  el._byStart=byStart;
+  simBuild();
+}
+function simBuild(){
+  const el=$("#tab-sim"); const byStart=el._byStart||{};
+  const tpl=TEMPLATES[$("#simType").value];
+  const sched=buildSchedule(tpl);
+  // 全体平均(フォールバック)
+  let gA=0,gW=0; Object.values(byStart).forEach(v=>{gA+=v.applied;gW+=v.won;});
+  const globalRate=gA?gW/gA:0.4;
+  const box=$("#simRows");
+  box.innerHTML=sched.map((s,i)=>{
+    const k=s.start_time.slice(0,5);
+    const v=byStart[k]; const rate=(v&&v.applied)?v.won/v.applied:globalRate;
+    const col=rate>=.5?'var(--ok)':rate>=.3?'var(--warn)':'var(--danger)';
+    const known=!!(v&&v.applied);
+    return `<div class="row" style="padding:9px 0;border-bottom:1px solid var(--line);gap:10px" data-rate="${rate}">
+      <div style="width:70px"><div style="font-weight:600">${s.bu_no}部</div><div class="dim" style="font-size:11px">${k}</div></div>
+      <input type="number" min="0" value="2" style="width:62px;text-align:center;padding:6px" oninput="simCalc()" class="simInput">
+      <span style="font-size:12px;color:${col};width:96px">当選率 ${Math.round(rate*100)}%${known?"":" <span class='dim'>(平均)</span>"}</span>
+      <span class="grow" style="text-align:right;font-weight:700">期待 <span class="expCell">0.0</span></span>
+    </div>`;
+  }).join("");
+  simCalc();
+}
+function simCalc(){
+  const rows=document.querySelectorAll("#simRows .row");
+  let totA=0,totE=0;
+  rows.forEach(r=>{
+    const rate=+r.dataset.rate; const v=+r.querySelector(".simInput").value||0;
+    const e=v*rate; totA+=v; totE+=e;
+    r.querySelector(".expCell").textContent=e.toFixed(1);
+  });
+  $("#simApp").textContent=totA;
+  $("#simExp").textContent=totE.toFixed(1);
+  $("#simRate").textContent=totA?Math.round(totE/totA*100)+"%":"—";
+}
+
+/* =========================================================================
+   モーダル / 設定 / バックアップ
+   ========================================================================= */
+function openModal(title,bodyHtml,onOk){
+  const wrap=document.createElement("div");
+  wrap.style.cssText="position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.6);display:flex;align-items:flex-end;justify-content:center;padding:0";
+  wrap.innerHTML=`<div style="background:var(--card);border:1px solid var(--line2);border-radius:18px 18px 0 0;width:100%;max-width:560px;max-height:88vh;overflow:auto;padding:18px 18px calc(20px + env(safe-area-inset-bottom))">
+    <div class="row" style="margin-bottom:14px"><h2 style="font-size:17px">${esc(title)}</h2>
+      <button class="btn sm ghost" style="margin-left:auto" id="mClose">閉じる</button></div>
+    <div id="mBody">${bodyHtml}</div>
+    <div class="row" style="margin-top:16px;gap:8px">
+      <button class="btn ghost grow" id="mCancel">キャンセル</button>
+      <button class="btn primary grow" id="mOk">保存</button></div>
+  </div>`;
+  document.body.appendChild(wrap);
+  const close=()=>wrap.remove();
+  wrap.querySelector("#mClose").onclick=close;
+  wrap.querySelector("#mCancel").onclick=close;
+  wrap.querySelector("#mOk").onclick=async()=>{
+    const ok=await onOk(); if(ok!==false){ close();
+      if(activeTab==="events")renderEvents(); if(activeTab==="home")renderHome(); }
+  };
+  wrap.onclick=e=>{ if(e.target===wrap) close(); };
+}
+
+function exportJSON(){
+  const blob={exported:new Date().toISOString(),settings:SETTINGS,data:DB};
+  const s=JSON.stringify(blob,null,2);
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([s],{type:"application/json"}));
+  a.download=`akushukai_backup_${new Date().toISOString().slice(0,10)}.json`;
+  a.click(); toast("JSONを書き出しました");
+}
+
+/* =========================================================================
+   ブート
+   ========================================================================= */
+async function boot(){
+  const {data:{user}}=await sb.auth.getUser();
+  if(!user){ renderAuth(); return; }
+  USER=user;
+  renderShell();
+  const ok=await loadAll();
+  if(ok) switchTab(activeTab);
+}
+async function init(){
+  if(!window.supabase || SUPA_URL.includes("YOUR-PROJECT")){
+    $("#app").innerHTML=`<div class="wrap" style="padding-top:12vh">
+      <div class="card"><h3 style="color:var(--danger)">セットアップ未完了</h3>
+      <p class="muted">index.html 冒頭の <code>SUPA_URL</code> と <code>SUPA_KEY</code> に、Supabase の Project URL と anon public key を貼り付けてください。</p>
+      <p class="dim" style="font-size:12px">同梱の <code>supabase_schema.sql</code> を SQL Editor で実行後、このページを再読み込みしてください。</p></div></div>`;
+    return;
+  }
+  sb=window.supabase.createClient(SUPA_URL,SUPA_KEY);
+  sb.auth.onAuthStateChange((ev)=>{ if(ev==="SIGNED_OUT"){ USER=null; renderAuth(); } });
+  await boot();
+}
+window.addEventListener("DOMContentLoaded",init);
+window.logout=async()=>{ await sb.auth.signOut(); };
+
+</script>
+</body>
+</html>
