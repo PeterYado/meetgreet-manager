@@ -102,22 +102,28 @@
     border-radius:var(--r2);padding:9px 11px;font-size:15px;width:100%;
   }
   input:focus,select:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px rgba(201,168,74,.15)}
-  /* iOS Safari: date/time 입력の폭を他の入力欄に揃える。
-     ※ appearance:none は付けない(プレースホルダ '年/月/日' とカレンダーicon が消え、
-        タップ可能と分かりにくくなるため)。幅と高さだけ整える。 */
-  input[type=date],input[type=time]{
-    width:100%;min-width:0;
-    min-height:42px;            /* 他のテキスト入力と同じ高さ感に */
-    line-height:1.4;
-    color:var(--txt);
+  input[type=time]{width:100%;min-width:0;min-height:42px;line-height:1.4;color:var(--txt)}
+  /* ---- 日付フィールド(方法A: ネイティブinputを透明に重ね、表示は自前) ----
+     iOS Safari の date 入力は空状態の見た目をCSSで制御しにくいため、
+     動作(タップでネイティブの日付ホイール)はネイティブ input に任せ、
+     見た目だけ .datedisp で完全に自前描画する。 */
+  .datewrap{position:relative;width:100%}
+  .datewrap input[type=date]{
+    position:absolute;inset:0;width:100%;height:100%;
+    margin:0;padding:0;border:0;opacity:0;            /* 透明にして上に重ねる */
+    -webkit-appearance:none;appearance:none;z-index:2;cursor:pointer;
   }
-  /* 値が空のときも「日付欄」と分かるよう、ピッカーアイコンを明るく */
-  input[type=date]::-webkit-calendar-picker-indicator,
-  input[type=time]::-webkit-calendar-picker-indicator{
-    filter:invert(1) opacity(.55);
-    margin-left:auto;cursor:pointer;
+  .datewrap .datedisp{
+    display:flex;align-items:center;gap:8px;
+    background:var(--bg2);border:1px solid var(--line2);
+    border-radius:var(--r2);padding:9px 11px;min-height:42px;
+    font-size:15px;color:var(--txt);pointer-events:none;       /* タップはinputへ通す */
   }
-  input[type=date]::-webkit-date-and-time-value{text-align:left}
+  .datewrap .datedisp.empty{color:var(--txt3)}                  /* 未選択は淡色 */
+  .datewrap .datedisp .cal{margin-left:auto;opacity:.7;font-size:16px}
+  /* inputがフォーカスされたら表示枠もハイライト */
+  .datewrap input[type=date]:focus + .datedisp{
+    border-color:var(--acc);box-shadow:0 0 0 3px rgba(201,168,74,.15)}
   label.fld{display:block;font-size:12px;color:var(--txt2);margin:0 0 5px 2px}
   .field{margin-bottom:12px}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -304,6 +310,33 @@ function eventTitle(e){
    ========================================================================= */
 const $=sel=>document.querySelector(sel);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+/* ---- 日付フィールド(方法A) ----
+   ネイティブ input[type=date] を透明に重ね、見た目は .datedisp で自前描画。
+   どの端末でも「年/月/日 と 📅」が必ず見え、タップでネイティブのピッカーが出る。 */
+function dateField(id, value, placeholder){
+  const v=value||"";
+  const disp=v?formatDateDisp(v):(placeholder||"日付を選択");
+  return `<div class="datewrap">
+    <input type="date" id="${id}" value="${v}" oninput="syncDateDisp('${id}','${esc(placeholder||"日付を選択")}')">
+    <div class="datedisp ${v?"":"empty"}" id="${id}_disp">
+      <span class="txt">${esc(disp)}</span><span class="cal">\u{1F4C5}</span>
+    </div>
+  </div>`;
+}
+function formatDateDisp(ymd){
+  // YYYY-MM-DD → YYYY年M月D日(曜)
+  const d=new Date(ymd+"T00:00:00"); if(isNaN(d)) return ymd;
+  const w=["日","月","火","水","木","金","土"][d.getDay()];
+  return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日(${w})`;
+}
+function syncDateDisp(id, placeholder){
+  const inp=document.getElementById(id), box=document.getElementById(id+"_disp");
+  if(!inp||!box) return;
+  const v=inp.value;
+  box.querySelector(".txt").textContent = v?formatDateDisp(v):(placeholder||"日付を選択");
+  box.classList.toggle("empty", !v);
+}
 
 /* ---------- ログイン画面 ---------- */
 function renderAuth(){
@@ -579,7 +612,7 @@ function newReleasePrompt(){
     <div class="field"><label class="fld">ラベル(例: 41st Single / 4th Album)</label>
       <input type="text" id="m_label" placeholder="41st Single"></div>
     <div class="field"><label class="fld">発売日(任意)</label>
-      <input type="date" id="m_date"></div>
+      ${dateField("m_date","","発売日を選択")}</div>
   `,async()=>{
     const label=$("#m_label").value.trim(); if(!label){toast("ラベルを入力してください");return false;}
     let gid=$("#m_group").value;
@@ -613,7 +646,7 @@ function newEventPrompt(rid){
       <select id="m_type" onchange="previewSched()">
         ${Object.entries(TEMPLATES).map(([k,t])=>`<option value="${k}">${esc(t.label)}</option>`).join("")}</select></div>
     <div class="grid2">
-      <div class="field"><label class="fld">開催日</label><input type="date" id="m_edate"></div>
+      <div class="field"><label class="fld">開催日</label>${dateField("m_edate","","開催日を選択")}</div>
       <div class="field"><label class="fld">会場(俺ん家=オンライン)</label><input type="text" id="m_venue" value="俺ん家"></div>
     </div>
     <div class="field"><label class="fld">部スケジュール プレビュー(後で個別編集可)</label>
