@@ -9,6 +9,8 @@
 <meta name="theme-color" content="#1a1a2e">
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="apple-touch-icon" href="./icon-180.png">
+<link rel="icon" type="image/png" sizes="32x32" href="./icon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png">
 <title>ミーグリ・握手会 スケジュール管理</title>
 <style>
   :root{
@@ -100,6 +102,15 @@
     border-radius:var(--r2);padding:9px 11px;font-size:15px;width:100%;
   }
   input:focus,select:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px rgba(201,168,74,.15)}
+  /* iOS Safari: date/time 입력이 기본 폭으로 삐져나가는 것 방지 */
+  input[type=date],input[type=time]{
+    -webkit-appearance:none;appearance:none;
+    min-width:0;max-width:100%;width:100%;
+    text-align:left;
+  }
+  input[type=date]::-webkit-date-and-time-value{text-align:left;margin:0}
+  input[type=date]::-webkit-calendar-picker-indicator,
+  input[type=time]::-webkit-calendar-picker-indicator{margin-left:auto}
   label.fld{display:block;font-size:12px;color:var(--txt2);margin:0 0 5px 2px}
   .field{margin-bottom:12px}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -192,7 +203,7 @@ const EVENT_TYPE_LABEL={
 
 /* ---------- グローバル状態 ---------- */
 let sb=null, USER=null;
-const DB={ groups:[],members:[],releases:[],events:[],sessions:[],applications:[],allocations:[] };
+const DB={ groups:[],members:[],releases:[],events:[],sessions:[],applications:[] };
 let SETTINGS={ yearGoal:0 };
 let activeTab="home";
 let selectedReleaseId=null, selectedEventId=null;
@@ -218,7 +229,7 @@ const tbl=name=>TBL_PREFIX+name;
 /* ---------- データ取得(開いた時に読み込む方式) ---------- */
 async function loadAll(){
   setSync("saving","読込中…");
-  const tables=["groups","members","releases","events","sessions","applications","allocations"];
+  const tables=["groups","members","releases","events","sessions","applications"];
   for(const t of tables){
     const {data,error}=await sb.from(tbl(t)).select("*");
     if(error){ console.error(t,error); setSync("err"); toast("読込失敗: "+t); return false; }
@@ -259,11 +270,21 @@ async function saveSettings(){
 /* ---------- 派生ヘルパ ---------- */
 const byId=(arr,id)=>arr.find(x=>x.id===id);
 const sessionsOf=eid=>DB.sessions.filter(s=>s.event_id===eid).sort((a,b)=>a.bu_no-b.bu_no);
+// 応募行(メンバー×部×回次)。session単位 / session×member単位 で取得。
 const appsOf=sid=>DB.applications.filter(a=>a.session_id===sid);
-const allocsOf=sid=>DB.allocations.filter(a=>a.session_id===sid);
+const appsOfSM=(sid,mid)=>DB.applications.filter(a=>a.session_id===sid&&a.member_id===mid).sort((a,b)=>a.round-b.round);
+// その部の当選合計(全メンバー)。homeや一覧の「当選枚数」表示用。
+const wonOfSession=sid=>appsOf(sid).reduce((n,a)=>n+(a.won||0),0);
+// そのイベントに登場するメンバーID一覧(応募行があるメンバー)。
+const membersInEvent=eid=>{
+  const set=new Set();
+  sessionsOf(eid).forEach(s=>appsOf(s.id).forEach(a=>set.add(a.member_id)));
+  return [...set];
+};
 const eventsOf=rid=>DB.events.filter(e=>e.release_id===rid).sort((a,b)=>(a.event_date>b.event_date?1:-1));
 function memberName(id){ const m=byId(DB.members,id); return m?m.name:"?"; }
 function releaseLabel(id){ const r=byId(DB.releases,id); return r?r.label:"?"; }
+function membersOfGroup(gid){ return DB.members.filter(m=>m.group_id===gid).sort((a,b)=>a.sort_order-b.sort_order); }
 function eventTitle(e){
   const r=byId(DB.releases,e.release_id);
   return `${r?r.label:""} / ${e.event_date} ${EVENT_TYPE_LABEL[e.event_type]||""}`;
@@ -362,7 +383,7 @@ function renderHome(){
   let todaySessions=[];
   todayEvents.forEach(e=>{
     sessionsOf(e.id).forEach(s=>{
-      const won=allocsOf(s.id).reduce((n,a)=>n+(a.won||0),0);
+      const won=wonOfSession(s.id);
       if(won>0) todaySessions.push({e,s,won});
     });
   });
@@ -396,7 +417,7 @@ function renderHome(){
   }else{
     html+=upcoming.map(e=>{
       const ss=sessionsOf(e.id);
-      const won=ss.reduce((n,s)=>n+allocsOf(s.id).reduce((m,a)=>m+(a.won||0),0),0);
+      const won=ss.reduce((n,s)=>n+wonOfSession(s.id),0);
       const dleft=daysLeft(e.event_date);
       const dpill = dleft===0?`<span class="pill close">本日</span>`
                   : dleft>0?`<span class="pill info">あと${dleft}日</span>`:"";
@@ -444,16 +465,15 @@ function daysLeft(ymd){
   return Math.round((d-t)/86400000);
 }
 function yearStats(year){
-  let won=0,events=0,applied=0,awon=0;
+  let won=0,events=0,applied=0;
   DB.events.forEach(e=>{
     if(!e.event_date.startsWith(year+"-")) return;
     events++;
     sessionsOf(e.id).forEach(s=>{
-      allocsOf(s.id).forEach(a=>won+=(a.won||0));
-      appsOf(s.id).forEach(ap=>{applied+=ap.applied||0;awon+=ap.won||0;});
+      appsOf(s.id).forEach(ap=>{applied+=ap.applied||0;won+=ap.won||0;});
     });
   });
-  return {won,events,rate:applied?Math.round(awon/applied*100)+"%":"—"};
+  return {won,events,rate:applied?Math.round(won/applied*100)+"%":"—"};
 }
 function startCountdown(list){
   if(countdownTimer) clearInterval(countdownTimer);
@@ -480,7 +500,9 @@ function startCountdown(list){
   tick(); countdownTimer=setInterval(tick,1000);
 }
 function memberWonStr(sid){
-  const a=allocsOf(sid).filter(x=>x.won>0).map(x=>`${memberName(x.member_id)}${x.won}`);
+  const byMem={};
+  appsOf(sid).forEach(a=>{ if(a.won>0) byMem[a.member_id]=(byMem[a.member_id]||0)+a.won; });
+  const a=Object.entries(byMem).map(([mid,w])=>`${memberName(mid)}${w}`);
   return a.join(" ")||"—";
 }
 
@@ -507,7 +529,7 @@ function renderEvents(){
   }
   rels.forEach(r=>{
     const evs=eventsOf(r.id);
-    const totalWon=evs.reduce((n,e)=>n+sessionsOf(e.id).reduce((m,s)=>m+allocsOf(s.id).reduce((k,a)=>k+(a.won||0),0),0),0);
+    const totalWon=evs.reduce((n,e)=>n+sessionsOf(e.id).reduce((m,s)=>m+wonOfSession(s.id),0),0);
     html+=`<div class="card">
       <div class="row">
         <div class="grow">
@@ -518,7 +540,7 @@ function renderEvents(){
       </div>`;
     if(evs.length){
       html+=`<hr class="sep">`+evs.map(e=>{
-        const won=sessionsOf(e.id).reduce((m,s)=>m+allocsOf(s.id).reduce((k,a)=>k+(a.won||0),0),0);
+        const won=sessionsOf(e.id).reduce((m,s)=>m+wonOfSession(s.id),0);
         return `<div class="row" style="padding:8px 0;cursor:pointer" onclick="openEvent('${e.id}')">
           <div class="grow">
             <span style="font-weight:600">${esc(e.event_date)}</span>
@@ -537,18 +559,45 @@ function renderEvents(){
 
 function newReleasePrompt(){
   const g=DB.groups.sort((a,b)=>a.sort_order-b.sort_order);
+  const noGroup=g.length===0;
   openModal(`新規リリース`,`
     <div class="field"><label class="fld">グループ</label>
-      <select id="m_group">${g.map(x=>`<option value="${x.id}" ${x.name==="乃木坂46"?"selected":""}>${esc(x.name)}</option>`).join("")}</select></div>
+      <select id="m_group" onchange="onReleaseGroupChange(this.value)">
+        ${g.map(x=>`<option value="${x.id}" ${x.name==="乃木坂46"?"selected":""}>${esc(x.name)}</option>`).join("")}
+        <option value="__new" ${noGroup?"selected":""}>＋ 新しいグループ…</option>
+      </select></div>
+    <div class="field" id="m_group_new_wrap" style="${noGroup?"":"display:none"}">
+      <label class="fld">新しいグループ名</label>
+      <input type="text" id="m_group_new" placeholder="乃木坂46" value="${noGroup?"乃木坂46":""}"></div>
     <div class="field"><label class="fld">ラベル(例: 41st Single / 4th Album)</label>
       <input type="text" id="m_label" placeholder="41st Single"></div>
     <div class="field"><label class="fld">発売日(任意)</label>
       <input type="date" id="m_date"></div>
   `,async()=>{
     const label=$("#m_label").value.trim(); if(!label){toast("ラベルを入力してください");return false;}
-    const row=await dbInsert("releases",{group_id:$("#m_group").value,label,release_date:$("#m_date").value||null,sort_order:DB.releases.length});
+    let gid=$("#m_group").value;
+    if(gid==="__new"){
+      const gname=$("#m_group_new").value.trim(); if(!gname){toast("グループ名を入力してください");return false;}
+      // 既存同名があれば再利用
+      let ex=DB.groups.find(x=>x.name===gname);
+      if(ex){ gid=ex.id; }
+      else{
+        const grow=await dbInsert("groups",{name:gname,sort_order:DB.groups.length});
+        DB.groups.push(grow); gid=grow.id;
+        // 乃木坂46 を作った場合、オシ(中西アルノ)も自動で用意
+        if(gname==="乃木坂46" && !DB.members.some(m=>m.group_id===gid)){
+          const mrow=await dbInsert("members",{group_id:gid,name:"中西アルノ",is_oshi:true,sort_order:0});
+          DB.members.push(mrow);
+        }
+      }
+    }
+    const row=await dbInsert("releases",{group_id:gid,label,release_date:$("#m_date").value||null,sort_order:DB.releases.length});
     DB.releases.push(row); toast("リリースを追加しました"); return true;
   });
+}
+function onReleaseGroupChange(v){
+  const w=document.getElementById("m_group_new_wrap");
+  if(w) w.style.display = (v==="__new") ? "" : "none";
 }
 
 function newEventPrompt(rid){
@@ -586,16 +635,26 @@ function previewSched(){
 
 function openEvent(id){ selectedEventId=id; switchTab("events"); }
 
-/* ---------- イベント詳細(部ごとの入力) ---------- */
+/* ---------- イベント詳細(対象メンバー × 部ごとの入力) ----------
+   応募行動の単位は「特定メンバーのその部」。上部でメンバーを選び、
+   各部カードにそのメンバーの回次別 申請/当選 を入力する。 */
+let detailMemberId=null;  // 現在表示中の対象メンバー
 function renderEventDetail(el){
   const e=byId(DB.events,selectedEventId);
   const ss=sessionsOf(e.id);
-  const mem=DB.members.filter(m=>m.group_id===byId(DB.releases,e.release_id)?.group_id);
-  const rounds=[...new Set(DB.applications.filter(a=>ss.some(s=>s.id===a.session_id)).map(a=>a.round))];
-  if(!rounds.length) rounds.push(1);
+  const gid=byId(DB.releases,e.release_id)?.group_id;
+  const groupMembers=membersOfGroup(gid);
+
+  // 対象メンバーの決定: 既存応募があるメンバー優先 → オシ → 先頭
+  const inEvent=membersInEvent(e.id);
+  if(!detailMemberId || !groupMembers.some(m=>m.id===detailMemberId)){
+    detailMemberId = inEvent[0]
+      || (groupMembers.find(m=>m.is_oshi)?.id)
+      || (groupMembers[0]?.id) || null;
+  }
 
   let html=`<div class="row" style="margin:6px 0 14px">
-    <button class="btn sm ghost" onclick="selectedEventId=null;renderEvents()">\u2039 一覧</button>
+    <button class="btn sm ghost" onclick="selectedEventId=null;detailMemberId=null;renderEvents()">\u2039 一覧</button>
     <h2 style="font-size:17px;margin-left:6px">${esc(e.event_date)} ${EVENT_TYPE_LABEL[e.event_type]}</h2>
   </div>`;
 
@@ -605,11 +664,29 @@ function renderEventDetail(el){
     <button class="btn sm ghost danger" onclick="delEvent('${e.id}')">削除</button>
   </div></div>`;
 
-  // 部ごとカード
+  // --- 対象メンバー選択 ---
+  html+=`<div class="card" style="border-color:var(--acc-d)">
+    <h3 style="color:var(--acc)">対象メンバー</h3>
+    <div class="row" style="gap:8px">
+      <select id="detailMember" onchange="changeDetailMember(this.value)" class="grow">
+        ${groupMembers.map(m=>`<option value="${m.id}" ${m.id===detailMemberId?"selected":""}>${esc(m.name)}${m.is_oshi?" ★":""}</option>`).join("")}
+        <option value="__new">＋ 新しいメンバー…</option>
+      </select>
+    </div>
+    <p class="dim" style="font-size:11px;margin:8px 0 0">応募・当選はこのメンバーの記録として保存されます。当選率もメンバー別に集計されます。</p>
+  </div>`;
+
+  if(!detailMemberId){
+    html+=`<div class="card"><div class="empty">メンバーがいません。上の「＋ 新しいメンバー…」で追加してください。</div></div>`;
+    el.innerHTML=html; return;
+  }
+
+  // --- 部ごとカード(対象メンバーの回次別 申請/当選) ---
   ss.forEach(s=>{
-    const apps=appsOf(s.id).sort((a,b)=>a.round-b.round);
-    const allocs=allocsOf(s.id);
-    const wonTotal=allocs.reduce((n,a)=>n+(a.won||0),0);
+    const apps=appsOfSM(s.id,detailMemberId);
+    const wonTotal=apps.reduce((n,a)=>n+(a.won||0),0);
+    const appTotal=apps.reduce((n,a)=>n+(a.applied||0),0);
+    const rateAll=appTotal?Math.round(wonTotal/appTotal*100):null;
     html+=`<div class="card">
       <div class="row">
         <h3 style="text-transform:none;color:var(--txt);font-size:15px">${s.bu_no}部
@@ -622,14 +699,17 @@ function renderEventDetail(el){
         <button class="btn sm ghost" onclick="editTimes('${s.id}')">時刻編集</button>
       </div>
 
-      <div style="font-size:12px;color:var(--txt2);margin:10px 0 4px">応募 / 当選 (回次別)</div>
+      <div class="row" style="margin:10px 0 4px">
+        <span style="font-size:12px;color:var(--txt2)">応募 / 当選 (回次別)</span>
+        ${rateAll!=null?`<span class="dim" style="font-size:11px;margin-left:auto">この部 計 当選${wonTotal}/申請${appTotal} ・ ${rateAll}%</span>`:""}
+      </div>
       <table style="font-size:13px"><tr class="dim" style="font-size:11px">
         <td>回次</td><td style="text-align:center">申請</td><td style="text-align:center">当選</td><td style="text-align:center">当選率</td><td></td></tr>
         ${apps.map(a=>`<tr>
           <td style="padding:4px 0">${a.round}次</td>
-          <td style="text-align:center"><input type="number" min="0" value="${a.applied}" style="width:64px;text-align:center;padding:5px"
+          <td style="text-align:center"><input type="number" min="0" value="${a.applied}" style="width:60px;text-align:center;padding:5px"
               onchange="updApp('${a.id}','applied',this.value)"></td>
-          <td style="text-align:center"><input type="number" min="0" value="${a.won}" style="width:64px;text-align:center;padding:5px"
+          <td style="text-align:center"><input type="number" min="0" value="${a.won}" style="width:60px;text-align:center;padding:5px"
               onchange="updApp('${a.id}','won',this.value)"></td>
           <td style="text-align:center;font-weight:600;color:${a.applied?(a.won/a.applied>=.5?'var(--ok)':a.won/a.applied>=.3?'var(--warn)':'var(--danger)'):'var(--txt3)'}">
             ${a.applied?Math.round(a.won/a.applied*100)+"%":"—"}</td>
@@ -637,31 +717,22 @@ function renderEventDetail(el){
         </tr>`).join("")}
       </table>
       <button class="btn sm ghost" style="margin-top:6px" onclick="addApp('${s.id}')">＋ 回次を追加</button>
-
-      <div style="font-size:12px;color:var(--txt2);margin:14px 0 4px">メンバー別 当選枚数 ${wonTotal?`(計${wonTotal})`:""}</div>
-      <div id="alloc-${s.id}">${allocRows(s.id,mem)}</div>
     </div>`;
   });
 
   el.innerHTML=html;
 }
-function allocRows(sid,mem){
-  const allocs=allocsOf(sid);
-  let h=allocs.map(a=>`<div class="row" style="padding:4px 0">
-      <span class="grow">${esc(memberName(a.member_id))}</span>
-      <input type="number" min="0" value="${a.won}" style="width:74px;text-align:center;padding:5px"
-        onchange="updAlloc('${a.id}',this.value)">
-      <button class="btn sm ghost danger" style="padding:3px 7px;margin-left:6px" onclick="delAlloc('${a.id}','${sid}')">×</button>
-    </div>`).join("");
-  const used=allocs.map(a=>a.member_id);
-  const avail=mem.filter(m=>!used.includes(m.id));
-  h+=`<div class="row" style="margin-top:6px;gap:6px">
-    <select id="addmem-${sid}" style="font-size:13px">
-      ${avail.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join("")}
-      <option value="__new">＋ 新しいメンバー…</option>
-    </select>
-    <button class="btn sm" onclick="addAlloc('${sid}')">追加</button></div>`;
-  return h;
+async function changeDetailMember(v){
+  if(v==="__new"){
+    const name=prompt("メンバー名を入力(例: 賀喜遥香)");
+    if(!name){ renderEvents(); return; }
+    const gid=byId(DB.releases, byId(DB.events,selectedEventId).release_id).group_id;
+    const m=await dbInsert("members",{group_id:gid,name:name.trim(),is_oshi:false,sort_order:DB.members.length});
+    DB.members.push(m); detailMemberId=m.id;
+  }else{
+    detailMemberId=v;
+  }
+  renderEvents();
 }
 
 /* === 続き(更新ハンドラ/当選率/応募計算)は次の追記で === */
@@ -671,28 +742,13 @@ async function updTopic(sid,v){ const s=byId(DB.sessions,sid); s.topic=v; await 
 async function updApp(id,field,v){ const a=byId(DB.applications,id); a[field]=+v||0; renderEvents();
   await dbUpdate("applications",id,{[field]:+v||0}); }
 async function addApp(sid){
-  const ex=appsOf(sid).map(a=>a.round); let r=1; while(ex.includes(r)) r++;
-  const row=await dbInsert("applications",{session_id:sid,round:r,applied:0,won:0});
+  if(!detailMemberId){ toast("対象メンバーを選んでください"); return; }
+  const ex=appsOfSM(sid,detailMemberId).map(a=>a.round); let r=1; while(ex.includes(r)) r++;
+  const row=await dbInsert("applications",{session_id:sid,member_id:detailMemberId,round:r,applied:0,won:0});
   DB.applications.push(row); renderEvents();
 }
 async function delApp(id){ DB.applications=DB.applications.filter(a=>a.id!==id); renderEvents(); await dbDelete("applications",id); }
 
-async function updAlloc(id,v){ const a=byId(DB.allocations,id); a.won=+v||0; renderEvents();
-  await dbUpdate("allocations",id,{won:+v||0}); }
-async function delAlloc(id){ DB.allocations=DB.allocations.filter(a=>a.id!==id); renderEvents(); await dbDelete("allocations",id); }
-async function addAlloc(sid){
-  const sel=$("#addmem-"+sid); let mid=sel.value;
-  if(mid==="__new"){
-    const name=prompt("メンバー名を入力(例: 賀喜遥香)"); if(!name) return;
-    const gid=byId(DB.releases, byId(DB.events,selectedEventId).release_id).group_id;
-    const m=await dbInsert("members",{group_id:gid,name:name.trim(),sort_order:DB.members.length});
-    DB.members.push(m); mid=m.id;
-  }
-  if(!mid) return;
-  if(allocsOf(sid).some(a=>a.member_id===mid)){ toast("既に追加済みです"); return; }
-  const row=await dbInsert("allocations",{session_id:sid,member_id:mid,won:0});
-  DB.allocations.push(row); renderEvents();
-}
 function editTimes(sid){
   const s=byId(DB.sessions,sid);
   openModal(`${s.bu_no}部 時刻編集`,`
@@ -718,7 +774,6 @@ async function delEvent(id){
   const sids=DB.sessions.filter(s=>s.event_id===id).map(s=>s.id);
   DB.sessions=DB.sessions.filter(s=>s.event_id!==id);
   DB.applications=DB.applications.filter(a=>!sids.includes(a.session_id));
-  DB.allocations=DB.allocations.filter(a=>!sids.includes(a.session_id));
   selectedEventId=null; renderEvents();
 }
 async function delRelease(id){
@@ -730,15 +785,50 @@ async function delRelease(id){
 }
 
 /* =========================================================================
-   TAB 3: 当選率 統計 (部別 = 時間帯別 の歴代平均)
+   TAB 3: 当選率 統計 … メンバー別・時間帯(部)別の歴代当選率
+   応募行動は「特定メンバーの部」が単位。メンバーを選んで集計する。
    ========================================================================= */
+let statsMemberId=null, statsType="all";
+function membersWithData(){
+  // 応募データがあるメンバーのみ(なければオシ→全員)
+  const ids=[...new Set(DB.applications.map(a=>a.member_id))];
+  if(ids.length) return DB.members.filter(m=>ids.includes(m.id));
+  return DB.members;
+}
 function renderStats(){
   const el=$("#tab-stats");
-  // 時間帯(開始時刻)別に 申請/当選 を集計 → 部の有利不利を可視化
+  const cand=membersWithData();
+  if(!statsMemberId || !cand.some(m=>m.id===statsMemberId)){
+    statsMemberId=(cand.find(m=>m.is_oshi)?.id)||(cand[0]?.id)||null;
+  }
+
+  let html=`<h2 style="font-size:19px;margin:6px 0 12px">歴代 当選率</h2>`;
+
+  if(!statsMemberId){
+    html+=`<div class="card"><div class="empty"><span class="big">\u{1F4CA}</span>
+      まだ応募データがありません。<br>「記録」で対象メンバーの申請・当選を入力すると、メンバー別の当選率がここに出ます。</div></div>`;
+    el.innerHTML=html; return;
+  }
+
+  // メンバー & 種別フィルタ
+  html+=`<div class="card">
+    <div class="field"><label class="fld">対象メンバー</label>
+      <select id="statsMember" onchange="statsMemberId=this.value;renderStats()">
+        ${membersWithData().map(m=>`<option value="${m.id}" ${m.id===statsMemberId?"selected":""}>${esc(m.name)}${m.is_oshi?" ★":""}</option>`).join("")}
+      </select></div>
+    <div class="field" style="margin-bottom:0"><label class="fld">種別</label>
+      <select id="statsType" onchange="statsType=this.value;renderStats()">
+        <option value="all" ${statsType==="all"?"selected":""}>すべて</option>
+        ${Object.entries(EVENT_TYPE_LABEL).map(([k,v])=>`<option value="${k}" ${statsType===k?"selected":""}>${esc(v)}</option>`).join("")}
+      </select></div>
+  </div>`;
+
+  // 集計: 対象メンバー × (種別) の時間帯別
   const byStart={};
   DB.sessions.forEach(s=>{
     const ev=byId(DB.events,s.event_id); if(!ev) return;
-    appsOf(s.id).forEach(a=>{
+    if(statsType!=="all" && ev.event_type!==statsType) return;
+    DB.applications.filter(a=>a.session_id===s.id && a.member_id===statsMemberId).forEach(a=>{
       const key=s.start_time.slice(0,5);
       (byStart[key]=byStart[key]||{applied:0,won:0,n:0});
       byStart[key].applied+=a.applied||0; byStart[key].won+=a.won||0; byStart[key].n++;
@@ -747,18 +837,15 @@ function renderStats(){
   const rows=Object.entries(byStart).map(([t,v])=>({t,...v,rate:v.applied?v.won/v.applied:null}))
     .filter(r=>r.applied>0).sort((a,b)=>toMin(a.t)-toMin(b.t));
 
-  let html=`<h2 style="font-size:19px;margin:6px 0 14px">歴代 当選率</h2>`;
-
   if(!rows.length){
-    html+=`<div class="card"><div class="empty"><span class="big">\u{1F4CA}</span>
-      まだ応募データがありません。<br>「記録」で各部の申請・当選を入力すると、時間帯ごとの当選率がここに出ます。</div></div>`;
+    html+=`<div class="card"><div class="empty">この条件の応募データがありません。</div></div>`;
     el.innerHTML=html; return;
   }
   const best=rows.reduce((a,b)=>(b.rate>a.rate?b:a));
   html+=`<div class="card" style="border-color:var(--acc-d)">
     <h3 style="color:var(--acc)">最も当たりやすい時間帯</h3>
     <div style="font-size:26px;font-weight:700">${best.t} <span style="font-size:16px;color:var(--ok)">${Math.round(best.rate*100)}%</span></div>
-    <div class="dim" style="font-size:12px">同じ応募枚数なら、この時間帯の部が有利な傾向です。</div></div>`;
+    <div class="dim" style="font-size:12px">${esc(memberName(statsMemberId))} の応募実績より。同じ応募枚数ならこの時間帯の部が有利な傾向です。</div></div>`;
 
   const max=Math.max(...rows.map(r=>r.rate));
   html+=`<div class="card"><h3>時間帯別 当選率</h3>`;
@@ -776,10 +863,14 @@ function renderStats(){
   });
   html+=`</div>`;
 
-  // リリース別 当選率(回次別の素も見える)
-  html+=`<div class="card"><h3>回次別 当選率</h3>`;
+  // 回次別 当選率(対象メンバー)
+  html+=`<div class="card"><h3>回次別 当選率 <span class="dim" style="font-weight:400;font-size:12px;text-transform:none">(${esc(memberName(statsMemberId))})</span></h3>`;
   const byRound={};
-  DB.applications.forEach(a=>{(byRound[a.round]=byRound[a.round]||{applied:0,won:0});byRound[a.round].applied+=a.applied||0;byRound[a.round].won+=a.won||0;});
+  DB.applications.filter(a=>a.member_id===statsMemberId).forEach(a=>{
+    const ev=byId(DB.events, (byId(DB.sessions,a.session_id)||{}).event_id);
+    if(statsType!=="all" && ev && ev.event_type!==statsType) return;
+    (byRound[a.round]=byRound[a.round]||{applied:0,won:0});byRound[a.round].applied+=a.applied||0;byRound[a.round].won+=a.won||0;
+  });
   const rr=Object.entries(byRound).filter(([k,v])=>v.applied>0).sort((a,b)=>a[0]-b[0]);
   if(!rr.length){ html+=`<div class="dim" style="font-size:13px">データなし</div>`; }
   else rr.forEach(([round,v])=>{
@@ -795,46 +886,55 @@ function renderStats(){
 
 /* =========================================================================
    TAB 4: 応募計算(シミュレーション)
-   各部に応募枚数を割り振り、歴代当選率から期待当選を試算。
+   対象メンバーを選び、各部に応募枚数を割り振り、そのメンバーの
+   歴代当選率から期待当選を試算する。
    ========================================================================= */
-let simState={};
+let simMemberId=null;
 function renderSim(){
   const el=$("#tab-sim");
-  // 時間帯別の歴代当選率(統計と同じロジック)
-  const byStart={};
-  DB.sessions.forEach(s=>{
-    appsOf(s.id).forEach(a=>{
-      const k=s.start_time.slice(0,5);(byStart[k]=byStart[k]||{applied:0,won:0});
-      byStart[k].applied+=a.applied||0;byStart[k].won+=a.won||0;});
-  });
+  const cand=membersWithData();
+  if(!simMemberId || !cand.some(m=>m.id===simMemberId)){
+    simMemberId=(cand.find(m=>m.is_oshi)?.id)||(cand[0]?.id)||null;
+  }
 
   let html=`<h2 style="font-size:19px;margin:6px 0 8px">応募シミュレーション</h2>
-    <p class="dim" style="font-size:13px;margin:0 0 14px">種別を選び、各部に応募枚数を入れると、歴代当選率から期待当選を試算します。</p>`;
+    <p class="dim" style="font-size:13px;margin:0 0 14px">対象メンバーと種別を選び、各部に応募枚数を入れると、そのメンバーの歴代当選率から期待当選を試算します。</p>`;
 
-  html+=`<div class="card"><div class="row" style="gap:8px">
-    <select id="simType" onchange="simBuild()" class="grow">
-      ${Object.entries(TEMPLATES).filter(([k])=>k!=="custom").map(([k,t])=>`<option value="${k}">${esc(t.label)}</option>`).join("")}</select>
-  </div>
-  <div id="simRows" style="margin-top:12px"></div>
-  <div class="grid3" style="margin-top:14px">
-    ${miniStat("応募 合計","<span id='simApp'>0</span>枚")}
-    ${miniStat("期待当選","<span id='simExp'>0.0</span>枚")}
-    ${miniStat("期待当選率","<span id='simRate'>—</span>")}
-  </div>
-  <p class="dim" style="font-size:11px;margin:10px 0 0">当選率は歴代平均(データが無い時間帯は全体平均で代用)。確率の目安です。</p>
+  html+=`<div class="card">
+    <div class="field"><label class="fld">対象メンバー</label>
+      <select id="simMember" onchange="simMemberId=this.value;renderSim()">
+        ${(cand.length?cand:DB.members).map(m=>`<option value="${m.id}" ${m.id===simMemberId?"selected":""}>${esc(m.name)}${m.is_oshi?" ★":""}</option>`).join("")}
+      </select></div>
+    <div class="field" style="margin-bottom:0"><label class="fld">種別</label>
+      <select id="simType" onchange="simBuild()">
+        ${Object.entries(TEMPLATES).filter(([k])=>k!=="custom").map(([k,t])=>`<option value="${k}">${esc(t.label)}</option>`).join("")}</select></div>
+    <div id="simRows" style="margin-top:12px"></div>
+    <div class="grid3" style="margin-top:14px">
+      ${miniStat("応募 合計","<span id='simApp'>0</span>枚")}
+      ${miniStat("期待当選","<span id='simExp'>0.0</span>枚")}
+      ${miniStat("期待当選率","<span id='simRate'>—</span>")}
+    </div>
+    <p class="dim" style="font-size:11px;margin:10px 0 0">当選率は選択メンバーの歴代平均(データが無い時間帯はそのメンバーの全体平均で代用)。確率の目安です。</p>
   </div>`;
   el.innerHTML=html;
-  el._byStart=byStart;
   simBuild();
 }
 function simBuild(){
-  const el=$("#tab-sim"); const byStart=el._byStart||{};
-  const tpl=TEMPLATES[$("#simType").value];
+  const el=$("#tab-sim");
+  // 選択メンバーの時間帯別当選率を集計
+  const byStart={};
+  if(simMemberId){
+    DB.sessions.forEach(s=>{
+      DB.applications.filter(a=>a.session_id===s.id && a.member_id===simMemberId).forEach(a=>{
+        const k=s.start_time.slice(0,5);(byStart[k]=byStart[k]||{applied:0,won:0});
+        byStart[k].applied+=a.applied||0;byStart[k].won+=a.won||0;});
+    });
+  }
+  const tpl=TEMPLATES[($("#simType")||{}).value||"real_meetgreet"];
   const sched=buildSchedule(tpl);
-  // 全体平均(フォールバック)
   let gA=0,gW=0; Object.values(byStart).forEach(v=>{gA+=v.applied;gW+=v.won;});
   const globalRate=gA?gW/gA:0.4;
-  const box=$("#simRows");
+  const box=$("#simRows"); if(!box) return;
   box.innerHTML=sched.map((s,i)=>{
     const k=s.start_time.slice(0,5);
     const v=byStart[k]; const rate=(v&&v.applied)?v.won/v.applied:globalRate;
