@@ -697,15 +697,19 @@ function newEventPrompt(rid){
     <div class="field"><label class="fld">種別(選ぶと部スケジュール自動生成)</label>
       <select id="m_type" onchange="previewSched()">
         ${Object.entries(TEMPLATES).map(([k,t])=>`<option value="${k}">${esc(t.label)}</option>`).join("")}</select></div>
+    <div class="field" id="m_bucount_wrap" style="display:none">
+      <label class="fld">部数(カスタム)</label>
+      <input type="number" id="m_bucount" min="1" max="12" value="6" onchange="previewSched()" oninput="previewSched()"></div>
     <div class="grid2">
       <div class="field"><label class="fld">開催日</label>${dateField("m_edate","","開催日を選択")}</div>
       <div class="field"><label class="fld">会場(俺ん家=オンライン)</label><input type="text" id="m_venue" value="俺ん家"></div>
     </div>
-    <div class="field"><label class="fld">部スケジュール プレビュー(後で個別編集可)</label>
+    <div class="field"><label class="fld">部スケジュール プレビュー(後で個別編集・追加可)</label>
       <div id="m_sched" style="background:var(--bg2);border:1px solid var(--line2);border-radius:10px;padding:10px;font-size:13px"></div></div>
   `,async()=>{
     const edate=$("#m_edate").value; if(!edate){toast("開催日を選択してください");return false;}
-    const type=$("#m_type").value, tpl=TEMPLATES[type];
+    const type=$("#m_type").value;
+    const tpl=schedTemplateFor(type);
     const ev=await dbInsert("events",{release_id:rid,event_date:edate,event_type:type,venue:$("#m_venue").value||""});
     DB.events.push(ev);
     for(const s of buildSchedule(tpl)){
@@ -716,8 +720,19 @@ function newEventPrompt(rid){
   });
   setTimeout(()=>{ const t=$("#m_type"); if(t){ t.value="kojin_online"; previewSched(); } },30);
 }
+// 種別に応じたテンプレ。カスタムは入力された部数を反映。
+function schedTemplateFor(type){
+  const tpl=Object.assign({},TEMPLATES[type]);
+  if(type==="custom"){
+    const n=Math.max(1,Math.min(12, parseInt(($("#m_bucount")||{}).value,10)||tpl.bu));
+    tpl.bu=n;
+  }
+  return tpl;
+}
 function previewSched(){
-  const tpl=TEMPLATES[$("#m_type").value]; const box=$("#m_sched"); if(!box) return;
+  const type=$("#m_type").value;
+  const wrap=$("#m_bucount_wrap"); if(wrap) wrap.style.display = (type==="custom") ? "" : "none";
+  const tpl=schedTemplateFor(type); const box=$("#m_sched"); if(!box) return;
   const v=$("#m_venue"); if(v && tpl.online && v.value==="") v.value="俺ん家";
   box.innerHTML=buildSchedule(tpl).map(s=>
     `<div class="row" style="padding:3px 0"><span style="width:40px;font-weight:600">${s.bu_no}部</span>
@@ -785,6 +800,7 @@ function renderEventDetail(el){
         <h3 style="text-transform:none;color:var(--txt);font-size:15px">${s.bu_no}部
           <span class="dim" style="font-weight:400;font-size:13px">${s.start_time.slice(0,5)}–${s.end_time.slice(0,5)}</span></h3>
         <span class="pill close" style="margin-left:auto">締切 ${s.receipt_close.slice(0,5)}</span>
+        ${ss.length>1?`<button class="btn sm ghost danger" style="padding:3px 8px;margin-left:6px" title="この部を削除" onclick="deleteSession('${s.id}')">部削除</button>`:""}
       </div>
       <div class="row" style="gap:6px;margin:8px 0">
         <input type="text" value="${esc(s.topic||"")}" placeholder="トークメモ(例: 乃木恋 / 誕生日)"
@@ -813,7 +829,46 @@ function renderEventDetail(el){
     </div>`;
   });
 
+  // --- 部を追加(末尾) ---
+  html+=`<button class="btn ghost" style="width:100%;padding:14px;border-style:dashed;font-size:20px;margin-bottom:14px"
+    title="部を追加" onclick="addSession('${e.id}')">＋</button>`;
+
   el.innerHTML=html;
+}
+// 末尾に部を1つ追加。直前の部の終了時刻+30分から、その部の長さ分で自動計算。
+async function addSession(eid){
+  const ss=sessionsOf(eid);
+  const last=ss[ss.length-1];
+  let start, end;
+  if(last){
+    const lastStart=toMin(last.start_time), lastEnd=toMin(last.end_time);
+    const dur=Math.max(30, lastEnd-lastStart);   // 直前の部と同じ長さ
+    start=lastEnd+30; end=start+dur;              // 休憩30分後に開始
+  }else{
+    start=toMin("12:00"); end=start+60;
+  }
+  const row=await dbInsert("sessions",{
+    event_id:eid, bu_no:(last?last.bu_no:0)+1,
+    start_time:toHM(start)+":00", end_time:toHM(end)+":00",
+    receipt_open:toHM(start-RECEIPT_BEFORE)+":00", receipt_close:toHM(end-RECEIPT_CUT)+":00",
+    topic:null
+  });
+  DB.sessions.push(row); renderEvents();
+}
+// 部を削除(その部の応募/当選も消える)。最後の1部は消せない。
+async function deleteSession(sid){
+  const s=byId(DB.sessions,sid); if(!s) return;
+  const sameEvent=sessionsOf(s.event_id);
+  if(sameEvent.length<=1){ toast("最後の部は削除できません"); return; }
+  const appCount=appsOf(sid).length;
+  const msg=appCount
+    ? `${s.bu_no}部 と、この部の応募/当選 記録 ${appCount}件 を削除します。よろしいですか?`
+    : `${s.bu_no}部 を削除します。よろしいですか?`;
+  if(!confirm(msg)) return;
+  await dbDelete("sessions",sid);   // applications は cascade
+  DB.sessions=DB.sessions.filter(x=>x.id!==sid);
+  DB.applications=DB.applications.filter(a=>a.session_id!==sid);
+  toast("部を削除しました"); renderEvents();
 }
 async function changeDetailMember(v){
   if(v==="__none"){ return; }   // プレースホルダ選択時は何もしない
