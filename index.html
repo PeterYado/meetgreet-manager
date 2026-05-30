@@ -942,61 +942,87 @@ function renderStats(){
    対象メンバーを選び、各部に応募枚数を割り振り、そのメンバーの
    歴代当選率から期待当選を試算する。
    ========================================================================= */
-let simMemberId=null;
+let simMemberId=null, simRound=1;
+function availableRounds(mid){
+  // そのメンバーの応募データに存在する回次(なければ1〜2)
+  const rs=[...new Set(DB.applications.filter(a=>a.member_id===mid).map(a=>a.round))].sort((a,b)=>a-b);
+  return rs.length?rs:[1,2];
+}
 function renderSim(){
   const el=$("#tab-sim");
   const cand=membersWithData();
   if(!simMemberId || !cand.some(m=>m.id===simMemberId)){
     simMemberId=(cand.find(m=>m.is_oshi)?.id)||(cand[0]?.id)||null;
   }
+  const rounds=simMemberId?availableRounds(simMemberId):[1,2];
+  if(!rounds.includes(simRound)) simRound=rounds[0];
 
   let html=`<h2 style="font-size:19px;margin:6px 0 8px">応募シミュレーション</h2>
-    <p class="dim" style="font-size:13px;margin:0 0 14px">対象メンバーと種別を選び、各部に応募枚数を入れると、そのメンバーの歴代当選率から期待当選を試算します。</p>`;
+    <p class="dim" style="font-size:13px;margin:0 0 14px">対象メンバー・応募回次・種別を選び、各部に応募枚数を入れると、その回次の歴代当選率から期待当選を試算します。</p>`;
 
   html+=`<div class="card">
     <div class="field"><label class="fld">対象メンバー</label>
       <select id="simMember" onchange="simMemberId=this.value;renderSim()">
         ${(cand.length?cand:DB.members).map(m=>`<option value="${m.id}" ${m.id===simMemberId?"selected":""}>${esc(m.name)}${m.is_oshi?" ★":""}</option>`).join("")}
       </select></div>
-    <div class="field" style="margin-bottom:0"><label class="fld">種別</label>
-      <select id="simType" onchange="simBuild()">
-        ${Object.entries(TEMPLATES).filter(([k])=>k!=="custom").map(([k,t])=>`<option value="${k}">${esc(t.label)}</option>`).join("")}</select></div>
+    <div class="grid2">
+      <div class="field" style="margin-bottom:0"><label class="fld">応募回次</label>
+        <select id="simRound" onchange="simRound=+this.value;simBuild()">
+          ${rounds.map(r=>`<option value="${r}" ${r===simRound?"selected":""}>${r}次</option>`).join("")}</select></div>
+      <div class="field" style="margin-bottom:0"><label class="fld">種別</label>
+        <select id="simType" onchange="simBuild()">
+          ${Object.entries(TEMPLATES).filter(([k])=>k!=="custom").map(([k,t])=>`<option value="${k}">${esc(t.label)}</option>`).join("")}</select></div>
+    </div>
     <div id="simRows" style="margin-top:12px"></div>
     <div class="grid3" style="margin-top:14px">
       ${miniStat("応募 合計","<span id='simApp'>0</span>枚")}
       ${miniStat("期待当選","<span id='simExp'>0.0</span>枚")}
       ${miniStat("期待当選率","<span id='simRate'>—</span>")}
     </div>
-    <p class="dim" style="font-size:11px;margin:10px 0 0">当選率は選択メンバーの歴代平均(データが無い時間帯はそのメンバーの全体平均で代用)。確率の目安です。</p>
+    <p class="dim" style="font-size:11px;margin:10px 0 0">当選率は選択メンバー・選択回次の歴代平均。回次×時間帯のデータが無い場合は「その回次の全体平均 → メンバー全体平均」の順で代用します。確率の目安です。</p>
   </div>`;
   el.innerHTML=html;
   simBuild();
 }
 function simBuild(){
   const el=$("#tab-sim");
-  // 選択メンバーの時間帯別当選率を集計
-  const byStart={};
+  // 選択メンバー × 選択回次 の「時間帯別」当選率を集計
+  const byStart={};            // 回次×時間帯
+  let rA=0,rW=0;               // その回次の全体(時間帯fallback用)
+  let mA=0,mW=0;               // そのメンバー全体(最終fallback用)
   if(simMemberId){
     DB.sessions.forEach(s=>{
+      const k=s.start_time.slice(0,5);
       DB.applications.filter(a=>a.session_id===s.id && a.member_id===simMemberId).forEach(a=>{
-        const k=s.start_time.slice(0,5);(byStart[k]=byStart[k]||{applied:0,won:0});
-        byStart[k].applied+=a.applied||0;byStart[k].won+=a.won||0;});
+        mA+=a.applied||0; mW+=a.won||0;
+        if(a.round===simRound){
+          (byStart[k]=byStart[k]||{applied:0,won:0});
+          byStart[k].applied+=a.applied||0; byStart[k].won+=a.won||0;
+          rA+=a.applied||0; rW+=a.won||0;
+        }
+      });
     });
   }
+  // fallback rate: その回次の全体平均 → メンバー全体平均 → 0.4
+  const roundRate = rA?rW/rA : (mA?mW/mA : 0.4);
+  const roundHasData = rA>0;
+
   const tpl=TEMPLATES[($("#simType")||{}).value||"real_meetgreet"];
   const sched=buildSchedule(tpl);
-  let gA=0,gW=0; Object.values(byStart).forEach(v=>{gA+=v.applied;gW+=v.won;});
-  const globalRate=gA?gW/gA:0.4;
   const box=$("#simRows"); if(!box) return;
-  box.innerHTML=sched.map((s,i)=>{
+  box.innerHTML=sched.map((s)=>{
     const k=s.start_time.slice(0,5);
-    const v=byStart[k]; const rate=(v&&v.applied)?v.won/v.applied:globalRate;
+    const v=byStart[k];
+    let rate, src;
+    if(v&&v.applied){ rate=v.won/v.applied; src="exact"; }     // 回次×時間帯の実績
+    else if(roundHasData){ rate=roundRate; src="round"; }       // その回次の全体平均
+    else { rate=roundRate; src="member"; }                      // メンバー全体平均
     const col=rate>=.5?'var(--ok)':rate>=.3?'var(--warn)':'var(--danger)';
-    const known=!!(v&&v.applied);
+    const note = src==="exact" ? "" : (src==="round" ? " <span class='dim'>(回次平均)</span>" : " <span class='dim'>(平均)</span>");
     return `<div class="row" style="padding:9px 0;border-bottom:1px solid var(--line);gap:10px" data-rate="${rate}">
       <div style="width:70px"><div style="font-weight:600">${s.bu_no}部</div><div class="dim" style="font-size:11px">${k}</div></div>
       <input type="number" min="0" value="2" style="width:62px;text-align:center;padding:6px" oninput="simCalc()" class="simInput">
-      <span style="font-size:12px;color:${col};width:96px">当選率 ${Math.round(rate*100)}%${known?"":" <span class='dim'>(平均)</span>"}</span>
+      <span style="font-size:12px;color:${col};width:104px">当選率 ${Math.round(rate*100)}%${note}</span>
       <span class="grow" style="text-align:right;font-weight:700">期待 <span class="expCell">0.0</span></span>
     </div>`;
   }).join("");
