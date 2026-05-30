@@ -693,13 +693,18 @@ function onReleaseGroupChange(v){
 }
 
 function newEventPrompt(rid){
+  // A案: 同じグループの「最新カスタム開催日」の部構成(部数・時刻)を既定値として読み込む。
+  // ユーザーが手で調整した実際の時刻をそのまま複製(計算ではなく実データのコピー)。
+  const gid=byId(DB.releases,rid)?.group_id;
+  PREV_CUSTOM = findLatestCustomSessions(gid);   // [{start,end,ro,rc,topic}] or null
+
   openModal(`開催日を追加`,`
     <div class="field"><label class="fld">種別(選ぶと部スケジュール自動生成)</label>
       <select id="m_type" onchange="previewSched()">
-        ${Object.entries(TEMPLATES).map(([k,t])=>`<option value="${k}">${esc(t.label)}</option>`).join("")}</select></div>
+        ${Object.entries(TEMPLATES).map(([k,t])=>`<option value="${k}">${esc(t.label)}${(k==="custom"&&PREV_CUSTOM)?"・前回の形を引継ぎ":""}</option>`).join("")}</select></div>
     <div class="field" id="m_bucount_wrap" style="display:none">
       <label class="fld">部数(カスタム)</label>
-      <input type="number" id="m_bucount" min="1" max="12" value="6" onchange="previewSched()" oninput="previewSched()"></div>
+      <input type="number" id="m_bucount" min="1" max="12" value="${PREV_CUSTOM?PREV_CUSTOM.length:6}" onchange="previewSched()" oninput="previewSched()"></div>
     <div class="grid2">
       <div class="field"><label class="fld">開催日</label>${dateField("m_edate","","開催日を選択")}</div>
       <div class="field"><label class="fld">会場(俺ん家=オンライン)</label><input type="text" id="m_venue" value="俺ん家"></div>
@@ -709,16 +714,56 @@ function newEventPrompt(rid){
   `,async()=>{
     const edate=$("#m_edate").value; if(!edate){toast("開催日を選択してください");return false;}
     const type=$("#m_type").value;
-    const tpl=schedTemplateFor(type);
     const ev=await dbInsert("events",{release_id:rid,event_date:edate,event_type:type,venue:$("#m_venue").value||""});
     DB.events.push(ev);
-    for(const s of buildSchedule(tpl)){
+    for(const s of currentPreviewSessions(type)){
       const srow=await dbInsert("sessions",Object.assign({event_id:ev.id},s));
       DB.sessions.push(srow);
     }
-    toast("開催日と部を作成しました"); selectedEventId=ev.id; return true;
+    toast("開催日と部を作成しました"); selectedEventId=ev.id; PREV_CUSTOM=null; return true;
   });
   setTimeout(()=>{ const t=$("#m_type"); if(t){ t.value="kojin_online"; previewSched(); } },30);
+}
+let PREV_CUSTOM=null;   // 引継ぎ用: 直近カスタムの部構成
+// 同じグループの最新のカスタム開催日を探し、その部の時刻配列を返す。無ければ null。
+function findLatestCustomSessions(gid){
+  if(!gid) return null;
+  const relIds=DB.releases.filter(r=>r.group_id===gid).map(r=>r.id);
+  const customEvents=DB.events
+    .filter(e=>relIds.includes(e.release_id) && e.event_type==="custom")
+    .sort((a,b)=>(a.event_date<b.event_date?1:-1));   // 新しい順
+  for(const ev of customEvents){
+    const ss=sessionsOf(ev.id);
+    if(ss.length) return ss.map(s=>({
+      start_time:s.start_time, end_time:s.end_time,
+      receipt_open:s.receipt_open, receipt_close:s.receipt_close
+    }));
+  }
+  return null;
+}
+// 現在のプレビュー内容(=作成される部)を返す。
+// カスタムで前回引継ぎがある場合はその時刻を、無ければ計算テンプレを使う。
+function currentPreviewSessions(type){
+  if(type==="custom" && PREV_CUSTOM){
+    const n=Math.max(1,Math.min(12, parseInt(($("#m_bucount")||{}).value,10)||PREV_CUSTOM.length));
+    const out=[];
+    for(let i=0;i<n;i++){
+      if(i<PREV_CUSTOM.length){
+        const p=PREV_CUSTOM[i];
+        out.push({bu_no:i+1,start_time:p.start_time,end_time:p.end_time,
+          receipt_open:p.receipt_open,receipt_close:p.receipt_close,topic:null});
+      }else{
+        // 引継ぎ部数を超えた分は、最後の部の翌枠を計算で補う
+        const prev=out[i-1];
+        const ps=toMin(prev.start_time), pe=toMin(prev.end_time);
+        const dur=Math.max(30,pe-ps), st=pe+30, en=st+dur;
+        out.push({bu_no:i+1,start_time:toHM(st)+":00",end_time:toHM(en)+":00",
+          receipt_open:toHM(st-RECEIPT_BEFORE)+":00",receipt_close:toHM(en-RECEIPT_CUT)+":00",topic:null});
+      }
+    }
+    return out;
+  }
+  return buildSchedule(schedTemplateFor(type));
 }
 // 種別に応じたテンプレ。カスタムは入力された部数を反映。
 function schedTemplateFor(type){
@@ -732,9 +777,10 @@ function schedTemplateFor(type){
 function previewSched(){
   const type=$("#m_type").value;
   const wrap=$("#m_bucount_wrap"); if(wrap) wrap.style.display = (type==="custom") ? "" : "none";
-  const tpl=schedTemplateFor(type); const box=$("#m_sched"); if(!box) return;
-  const v=$("#m_venue"); if(v && tpl.online && v.value==="") v.value="俺ん家";
-  box.innerHTML=buildSchedule(tpl).map(s=>
+  const box=$("#m_sched"); if(!box) return;
+  const v=$("#m_venue"); const tplOnline=TEMPLATES[type]?.online;
+  if(v && tplOnline && v.value==="") v.value="俺ん家";
+  box.innerHTML=currentPreviewSessions(type).map(s=>
     `<div class="row" style="padding:3px 0"><span style="width:40px;font-weight:600">${s.bu_no}部</span>
      <span class="grow">${s.start_time.slice(0,5)}–${s.end_time.slice(0,5)}</span>
      <span class="pill close" style="font-size:10px">締切 ${s.receipt_close.slice(0,5)}</span></div>`).join("");
