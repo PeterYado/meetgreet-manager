@@ -591,50 +591,63 @@ function renderEvents(){
         </div>`;
       }).join("");
     }
-    html+=`<div style="margin-top:8px"><button class="btn sm ghost danger" onclick="delRelease('${r.id}')">リリース削除</button></div>`;
+    html+=`<div class="row" style="margin-top:8px;gap:8px">
+      <button class="btn sm ghost" onclick="editReleasePrompt('${r.id}')">編集</button>
+      <button class="btn sm ghost danger" onclick="delRelease('${r.id}')">削除</button></div>`;
     html+=`</div>`;
   });
   el.innerHTML=html;
 }
 
-function newReleasePrompt(){
+function newReleasePrompt(editId){
   const g=DB.groups.sort((a,b)=>a.sort_order-b.sort_order);
   const noGroup=g.length===0;
-  openModal(`新規リリース`,`
+  const ed = editId ? byId(DB.releases,editId) : null;   // 編集対象(なければ新規)
+  const curGid = ed ? ed.group_id : null;
+  const curLabel = ed ? ed.label : "";
+  const curDate = ed ? (ed.release_date||"") : "";
+  openModal(ed?`リリース編集`:`新規リリース`,`
     <div class="field"><label class="fld">グループ</label>
       <select id="m_group" onchange="onReleaseGroupChange(this.value)">
-        ${g.map(x=>`<option value="${x.id}" ${x.name==="乃木坂46"?"selected":""}>${esc(x.name)}</option>`).join("")}
-        <option value="__new" ${noGroup?"selected":""}>＋ 新しいグループ…</option>
+        ${g.map(x=>`<option value="${x.id}" ${ (ed? x.id===curGid : x.name==="乃木坂46") ?"selected":""}>${esc(x.name)}</option>`).join("")}
+        <option value="__new" ${(!ed&&noGroup)?"selected":""}>＋ 新しいグループ…</option>
       </select></div>
-    <div class="field" id="m_group_new_wrap" style="${noGroup?"":"display:none"}">
+    <div class="field" id="m_group_new_wrap" style="${(!ed&&noGroup)?"":"display:none"}">
       <label class="fld">新しいグループ名</label>
-      <input type="text" id="m_group_new" placeholder="乃木坂46" value="${noGroup?"乃木坂46":""}"></div>
+      <input type="text" id="m_group_new" placeholder="乃木坂46" value="${(!ed&&noGroup)?"乃木坂46":""}"></div>
     <div class="field"><label class="fld">ラベル(例: 41st Single / 4th Album)</label>
-      <input type="text" id="m_label" placeholder="41st Single"></div>
+      <input type="text" id="m_label" placeholder="41st Single" value="${esc(curLabel)}"></div>
     <div class="field"><label class="fld">発売日(任意)</label>
-      ${dateField("m_date","","発売日を選択")}</div>
+      ${dateField("m_date",curDate,"発売日を選択")}</div>
   `,async()=>{
     const label=$("#m_label").value.trim(); if(!label){toast("ラベルを入力してください");return false;}
     let gid=$("#m_group").value;
     if(gid==="__new"){
       const gname=$("#m_group_new").value.trim(); if(!gname){toast("グループ名を入力してください");return false;}
-      // 既存同名があれば再利用
       let ex=DB.groups.find(x=>x.name===gname);
       if(ex){ gid=ex.id; }
       else{
         const grow=await dbInsert("groups",{name:gname,sort_order:DB.groups.length});
         DB.groups.push(grow); gid=grow.id;
-        // 乃木坂46 を作った場合、オシ(中西アルノ)も自動で用意
         if(gname==="乃木坂46" && !DB.members.some(m=>m.group_id===gid)){
           const mrow=await dbInsert("members",{group_id:gid,name:"中西アルノ",is_oshi:true,sort_order:0});
           DB.members.push(mrow);
         }
       }
     }
-    const row=await dbInsert("releases",{group_id:gid,label,release_date:$("#m_date").value||null,sort_order:DB.releases.length});
-    DB.releases.push(row); toast("リリースを追加しました"); return true;
+    const patch={group_id:gid,label,release_date:$("#m_date").value||null};
+    if(ed){
+      Object.assign(ed,patch);
+      await dbUpdate("releases",ed.id,patch);
+      toast("リリースを更新しました");
+    }else{
+      const row=await dbInsert("releases",Object.assign(patch,{sort_order:DB.releases.length}));
+      DB.releases.push(row); toast("リリースを追加しました");
+    }
+    return true;
   });
 }
+function editReleasePrompt(id){ newReleasePrompt(id); }
 function onReleaseGroupChange(v){
   const w=document.getElementById("m_group_new_wrap");
   if(w) w.style.display = (v==="__new") ? "" : "none";
