@@ -983,18 +983,39 @@ async function delRelease(id){
    TAB 3: 当選率 統計 … メンバー別・時間帯(部)別の歴代当選率
    応募行動は「特定メンバーの部」が単位。メンバーを選んで集計する。
    ========================================================================= */
-let statsMemberId=null, statsType="all";
+let statsMemberId=null, statsType=null;   // null=未設定(データのある先頭種別を既定にする)
+// 種別の表示順(頻度順): 個別オンライン→全国オンライン→リアルミーグリ→個別握手会→カスタム
+const TYPE_ORDER=["kojin_online","zenkoku_online","real_meetgreet","kojin_akushu","custom"];
+function sortTypes(arr){ return [...arr].sort((a,b)=>TYPE_ORDER.indexOf(a)-TYPE_ORDER.indexOf(b)); }
 function membersWithData(){
   // 応募データがあるメンバーのみ(なければオシ→全員)
   const ids=[...new Set(DB.applications.map(a=>a.member_id))];
   if(ids.length) return DB.members.filter(m=>ids.includes(m.id));
   return DB.members;
 }
+// そのメンバーが「応募実績を持つ」種別一覧(統計用)。表示順でソート。
+function statsTypesOfMember(mid){
+  const set=new Set();
+  DB.applications.filter(a=>a.member_id===mid).forEach(a=>{
+    const ev=byId(DB.events,(byId(DB.sessions,a.session_id)||{}).event_id);
+    if(ev) set.add(ev.event_type);
+  });
+  return sortTypes([...set]);
+}
+// そのメンバーの所属グループに「イベントが存在する」種別一覧(シミュ用)。表示順でソート。
+function simTypesOfMember(mid){
+  const m=byId(DB.members,mid); if(!m) return [];
+  const relIds=DB.releases.filter(r=>r.group_id===m.group_id).map(r=>r.id);
+  const set=new Set();
+  DB.events.filter(e=>relIds.includes(e.release_id)).forEach(e=>set.add(e.event_type));
+  return sortTypes([...set]);
+}
 function renderStats(){
   const el=$("#tab-stats");
   const cand=membersWithData();
   if(!statsMemberId || !cand.some(m=>m.id===statsMemberId)){
     statsMemberId=(cand.find(m=>m.is_oshi)?.id)||(cand[0]?.id)||null;
+    statsType=null;   // メンバーが変わったら種別も再決定
   }
 
   let html=`<h2 style="font-size:19px;margin:6px 0 12px">歴代 当選率</h2>`;
@@ -1005,24 +1026,37 @@ function renderStats(){
     el.innerHTML=html; return;
   }
 
-  // メンバー & 種別フィルタ
+  // このメンバーが実績を持つ種別(表示順)。既定はその先頭。
+  const types=statsTypesOfMember(statsMemberId);
+  if(!types.length){
+    // メンバー選択UIだけ出して、データなしを伝える
+    html+=`<div class="card">
+      <div class="field" style="margin-bottom:0"><label class="fld">対象メンバー</label>
+        <select id="statsMember" onchange="statsMemberId=this.value;renderStats()">
+          ${cand.map(m=>`<option value="${m.id}" ${m.id===statsMemberId?"selected":""}>${esc(m.name)}${m.is_oshi?" ★":""}</option>`).join("")}
+        </select></div></div>
+      <div class="card"><div class="empty">このメンバーの応募データがありません。</div></div>`;
+    el.innerHTML=html; return;
+  }
+  if(!statsType || !types.includes(statsType)) statsType=types[0];
+
+  // メンバー & 種別フィルタ(すべては廃止。実績のある種別のみ)
   html+=`<div class="card">
     <div class="field"><label class="fld">対象メンバー</label>
       <select id="statsMember" onchange="statsMemberId=this.value;renderStats()">
-        ${membersWithData().map(m=>`<option value="${m.id}" ${m.id===statsMemberId?"selected":""}>${esc(m.name)}${m.is_oshi?" ★":""}</option>`).join("")}
+        ${cand.map(m=>`<option value="${m.id}" ${m.id===statsMemberId?"selected":""}>${esc(m.name)}${m.is_oshi?" ★":""}</option>`).join("")}
       </select></div>
     <div class="field" style="margin-bottom:0"><label class="fld">種別</label>
       <select id="statsType" onchange="statsType=this.value;renderStats()">
-        <option value="all" ${statsType==="all"?"selected":""}>すべて</option>
-        ${Object.entries(EVENT_TYPE_LABEL).map(([k,v])=>`<option value="${k}" ${statsType===k?"selected":""}>${esc(v)}</option>`).join("")}
+        ${types.map(k=>`<option value="${k}" ${statsType===k?"selected":""}>${esc(EVENT_TYPE_LABEL[k])}</option>`).join("")}
       </select></div>
   </div>`;
 
-  // 集計: 対象メンバー × 種別 の「部」別(種別を選べば部番号で一貫するため部単位で集計)
+  // 集計: 対象メンバー × 種別 の「部」別
   const byBu={};
   DB.sessions.forEach(s=>{
     const ev=byId(DB.events,s.event_id); if(!ev) return;
-    if(statsType!=="all" && ev.event_type!==statsType) return;
+    if(ev.event_type!==statsType) return;
     DB.applications.filter(a=>a.session_id===s.id && a.member_id===statsMemberId).forEach(a=>{
       (byBu[s.bu_no]=byBu[s.bu_no]||{applied:0,won:0,n:0,times:{}});
       byBu[s.bu_no].applied+=a.applied||0; byBu[s.bu_no].won+=a.won||0; byBu[s.bu_no].n++;
@@ -1065,7 +1099,7 @@ function renderStats(){
   const byRound={};
   DB.applications.filter(a=>a.member_id===statsMemberId).forEach(a=>{
     const ev=byId(DB.events, (byId(DB.sessions,a.session_id)||{}).event_id);
-    if(statsType!=="all" && ev && ev.event_type!==statsType) return;
+    if(ev && ev.event_type!==statsType) return;
     (byRound[a.round]=byRound[a.round]||{applied:0,won:0});byRound[a.round].applied+=a.applied||0;byRound[a.round].won+=a.won||0;
   });
   const rr=Object.entries(byRound).filter(([k,v])=>v.applied>0).sort((a,b)=>a[0]-b[0]);
@@ -1086,7 +1120,7 @@ function renderStats(){
    対象メンバーを選び、各部に応募枚数を割り振り、そのメンバーの
    歴代当選率から期待当選を試算する。
    ========================================================================= */
-let simMemberId=null, simRound=1;
+let simMemberId=null, simRound=1, simType=null;
 function availableRounds(mid){
   // そのメンバーの応募データに存在する回次(なければ1〜2)
   const rs=[...new Set(DB.applications.filter(a=>a.member_id===mid).map(a=>a.round))].sort((a,b)=>a-b);
@@ -1097,9 +1131,13 @@ function renderSim(){
   const cand=membersWithData();
   if(!simMemberId || !cand.some(m=>m.id===simMemberId)){
     simMemberId=(cand.find(m=>m.is_oshi)?.id)||(cand[0]?.id)||null;
+    simType=null;   // メンバーが変わったら種別も再決定
   }
   const rounds=simMemberId?availableRounds(simMemberId):[1,2];
   if(!rounds.includes(simRound)) simRound=rounds[0];
+  // このメンバーの所属グループにイベントが存在する種別(表示順)。既定は先頭。
+  const types=simMemberId?simTypesOfMember(simMemberId):[];
+  if(!simType || !types.includes(simType)) simType=types[0]||null;
 
   let html=`<h2 style="font-size:19px;margin:6px 0 8px">応募シミュレーション</h2>
     <p class="dim" style="font-size:13px;margin:0 0 14px">対象メンバー・応募回次・種別を選び、各部に応募枚数を入れると、その回次の歴代当選率から期待当選を試算します。</p>`;
@@ -1114,8 +1152,9 @@ function renderSim(){
         <select id="simRound" onchange="simRound=+this.value;simBuild()">
           ${rounds.map(r=>`<option value="${r}" ${r===simRound?"selected":""}>${r}次</option>`).join("")}</select></div>
       <div class="field" style="margin-bottom:0"><label class="fld">種別</label>
-        <select id="simType" onchange="simBuild()">
-          ${Object.entries(TEMPLATES).filter(([k])=>k!=="custom").map(([k,t])=>`<option value="${k}">${esc(t.label)}</option>`).join("")}</select></div>
+        <select id="simType" onchange="simType=this.value;simBuild()">
+          ${types.length?types.map(k=>`<option value="${k}" ${simType===k?"selected":""}>${esc(EVENT_TYPE_LABEL[k])}</option>`).join("")
+              :`<option value="">(イベントなし)</option>`}</select></div>
     </div>
     <div id="simRows" style="margin-top:12px"></div>
     <div class="grid3" style="margin-top:14px">
@@ -1129,29 +1168,47 @@ function renderSim(){
   simBuild();
 }
 function simBuild(){
-  const type=($("#simType")||{}).value||"real_meetgreet";
+  const type=($("#simType")||{}).value||simType;
+  const box=$("#simRows"); if(!box) return;
+  if(!type){ box.innerHTML=`<div class="empty" style="padding:20px">このメンバーの所属グループにイベントがありません。</div>`; simCalc(); return; }
+
   // 選択メンバー × 選択種別 × 選択回次 の「部」別当選率を集計(種別で完全に分離)
+  // 各部の代表時刻も保持(カスタムは実データの時刻を使うため)。
   const byBu={};
   if(simMemberId){
     DB.sessions.forEach(s=>{
       const ev=byId(DB.events,s.event_id); if(!ev) return;
       if(ev.event_type!==type) return;                 // ★種別フィルタ(他種別を混ぜない)
       DB.applications.filter(a=>a.session_id===s.id && a.member_id===simMemberId && a.round===simRound).forEach(a=>{
-        (byBu[s.bu_no]=byBu[s.bu_no]||{applied:0,won:0});
+        (byBu[s.bu_no]=byBu[s.bu_no]||{applied:0,won:0,times:{}});
         byBu[s.bu_no].applied+=a.applied||0; byBu[s.bu_no].won+=a.won||0;
+        const t=s.start_time.slice(0,5); byBu[s.bu_no].times[t]=(byBu[s.bu_no].times[t]||0)+1;
       });
     });
   }
-  const tpl=TEMPLATES[type];
-  const sched=buildSchedule(tpl);
-  const box=$("#simRows"); if(!box) return;
-  box.innerHTML=sched.map((s)=>{
-    const k=s.start_time.slice(0,5);
+  const repTime=v=>{ const e=Object.entries(v.times||{}); return e.length?e.sort((a,b)=>b[1]-a[1])[0][0]:""; };
+
+  // 行(部)の構成:
+  //  - 標準種別: TEMPLATESの固定スケジュール(部数・時刻が定まっている)
+  //  - カスタム: 形が開催ごとに違うため、そのメンバーが実際に応募した部のみを実データから構成
+  let rowsSpec;
+  if(type==="custom"){
+    rowsSpec=Object.keys(byBu).map(Number).sort((a,b)=>a-b)
+      .map(bu=>({bu_no:bu, k:repTime(byBu[bu])}));
+    if(!rowsSpec.length){
+      box.innerHTML=`<div class="empty" style="padding:20px">この回次のカスタム応募データがありません。<br>「記録」で申請・当選を入力すると試算できます。</div>`;
+      simCalc(); return;
+    }
+  }else{
+    rowsSpec=buildSchedule(TEMPLATES[type]).map(s=>({bu_no:s.bu_no, k:s.start_time.slice(0,5)}));
+  }
+
+  box.innerHTML=rowsSpec.map((s)=>{
+    const k=s.k;
     const v=byBu[s.bu_no];
     const hasData = !!(v && v.applied);
     const rate = hasData ? v.won/v.applied : null;
     if(!hasData){
-      // データなし: 期待計算に含めない(data-rate を付けない)
       return `<div class="row" style="padding:9px 0;border-bottom:1px solid var(--line);gap:10px;opacity:.65" data-nodata="1">
         <div style="width:70px"><div style="font-weight:600">${s.bu_no}部</div><div class="dim" style="font-size:11px">${k}</div></div>
         <input type="number" min="0" value="3" style="width:62px;text-align:center;padding:6px" disabled class="simInput">
