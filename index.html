@@ -217,6 +217,15 @@ const EVENT_TYPE_LABEL={
   kojin_online:"個別オンライン", kojin_akushu:"個別握手会",
   zenkoku_online:"全国オンライン", real_meetgreet:"リアルミーグリ", custom:"カスタム"
 };
+// 種別id → 表示名。標準種別は上の辞書、ユーザー定義(ct_xxx)は SETTINGS から。
+// 旧データの "custom" は「カスタム(旧)」と表示。
+function typeLabel(type){
+  if(!type) return "";
+  if(EVENT_TYPE_LABEL[type]) return type==="custom" ? "カスタム(旧)" : EVENT_TYPE_LABEL[type];
+  const ct=(SETTINGS.customTypes||[]).find(c=>c.id===type);
+  return ct ? ct.name : "カスタム";
+}
+function isCustomType(type){ return type==="custom" || (type||"").startsWith("ct_"); }
 
 /* ---------- グローバル状態 ---------- */
 let sb=null, USER=null;
@@ -305,7 +314,7 @@ function releaseLabel(id){ const r=byId(DB.releases,id); return r?r.label:"?"; }
 function membersOfGroup(gid){ return DB.members.filter(m=>m.group_id===gid).sort((a,b)=>a.sort_order-b.sort_order); }
 function eventTitle(e){
   const r=byId(DB.releases,e.release_id);
-  return `${r?r.label:""} / ${e.event_date} ${EVENT_TYPE_LABEL[e.event_type]||""}`;
+  return `${r?r.label:""} / ${e.event_date} ${typeLabel(e.event_type)}`;
 }
 
 /* === 続きの描画ロジックは次の追記で === */
@@ -503,7 +512,7 @@ function renderHome(){
       return `<div class="row" style="padding:9px 0;border-bottom:1px solid var(--line);cursor:pointer"
                    onclick="openEvent('${e.id}')">
         <div class="grow">
-          <div style="font-weight:600">${esc(e.event_date)} <span class="dim" style="font-weight:400">${EVENT_TYPE_LABEL[e.event_type]||""}</span></div>
+          <div style="font-weight:600">${esc(e.event_date)} <span class="dim" style="font-weight:400">${typeLabel(e.event_type)}</span></div>
           <div class="dim" style="font-size:12px">${esc(releaseLabel(e.release_id))} ・ ${esc(e.venue||"")} ${won?`・ 当選 ${won}枚`:""}</div>
         </div>${dpill}
       </div>`;
@@ -624,7 +633,7 @@ function renderEvents(){
         return `<div class="row" style="padding:8px 0;cursor:pointer" onclick="openEvent('${e.id}')">
           <div class="grow">
             <span style="font-weight:600">${esc(e.event_date)}</span>
-            <span class="pill gold" style="margin-left:6px">${EVENT_TYPE_LABEL[e.event_type]}</span>
+            <span class="pill gold" style="margin-left:6px">${typeLabel(e.event_type)}</span>
           </div>
           <span class="dim" style="font-size:12px">${esc(e.venue||"")} ${won?`・${won}枚`:""}</span>
           <span class="dim" style="margin-left:8px">\u203A</span>
@@ -694,18 +703,17 @@ function onReleaseGroupChange(v){
 }
 
 function newEventPrompt(rid){
-  // A案: 同じグループの「最新カスタム開催日」の部構成(部数・時刻)を既定値として読み込む。
-  // ユーザーが手で調整した実際の時刻をそのまま複製(計算ではなく実データのコピー)。
   const gid=byId(DB.releases,rid)?.group_id;
-  PREV_CUSTOM = findLatestCustomSessions(gid);   // [{start,end,ro,rc,topic}] or null
+  const customTypes=customTypesOfGroup(gid);   // このグループのユーザー定義種別
+  // 種別の選択肢: 標準種別(customを除く) + ユーザー定義カスタム種別
+  const stdTypes=["kojin_online","kojin_akushu","zenkoku_online","real_meetgreet"];
+  const opts = stdTypes.map(k=>`<option value="${k}">${esc(EVENT_TYPE_LABEL[k])}</option>`).join("")
+    + customTypes.map(c=>`<option value="${c.id}">${esc(c.name)} (${c.sessions.length}部)</option>`).join("");
 
   openModal(`開催日を追加`,`
     <div class="field"><label class="fld">種別(選ぶと部スケジュール自動生成)</label>
-      <select id="m_type" onchange="previewSched()">
-        ${Object.entries(TEMPLATES).map(([k,t])=>`<option value="${k}">${esc(t.label)}${(k==="custom"&&PREV_CUSTOM)?"・前回の形を引継ぎ":""}</option>`).join("")}</select></div>
-    <div class="field" id="m_bucount_wrap" style="display:none">
-      <label class="fld">部数(カスタム)</label>
-      <input type="number" id="m_bucount" min="1" max="12" value="${PREV_CUSTOM?PREV_CUSTOM.length:6}" onchange="previewSched()" oninput="previewSched()"></div>
+      <select id="m_type" onchange="previewSched()">${opts}</select></div>
+    <p class="dim" style="font-size:11px;margin:-4px 0 10px">カスタムな進行(他グループの握手会など)は「データ編集」でカスタム種別を登録すると、ここに出ます。</p>
     <div class="grid2">
       <div class="field"><label class="fld">開催日</label>${dateField("m_edate","","開催日を選択")}</div>
       <div class="field"><label class="fld">会場(俺ん家=オンライン)</label><input type="text" id="m_venue" value="俺ん家"></div>
@@ -721,63 +729,25 @@ function newEventPrompt(rid){
       const srow=await dbInsert("sessions",Object.assign({event_id:ev.id},s));
       DB.sessions.push(srow);
     }
-    toast("開催日と部を作成しました"); selectedEventId=ev.id; PREV_CUSTOM=null; return true;
+    toast("開催日と部を作成しました"); selectedEventId=ev.id; return true;
   });
-  setTimeout(()=>{ const t=$("#m_type"); if(t){ t.value="kojin_online"; previewSched(); } },30);
-}
-let PREV_CUSTOM=null;   // 引継ぎ用: 直近カスタムの部構成
-// 同じグループの最新のカスタム開催日を探し、その部の時刻配列を返す。無ければ null。
-function findLatestCustomSessions(gid){
-  if(!gid) return null;
-  const relIds=DB.releases.filter(r=>r.group_id===gid).map(r=>r.id);
-  const customEvents=DB.events
-    .filter(e=>relIds.includes(e.release_id) && e.event_type==="custom")
-    .sort((a,b)=>(a.event_date<b.event_date?1:-1));   // 新しい順
-  for(const ev of customEvents){
-    const ss=sessionsOf(ev.id);
-    if(ss.length) return ss.map(s=>({
-      start_time:s.start_time, end_time:s.end_time,
-      receipt_open:s.receipt_open, receipt_close:s.receipt_close
-    }));
-  }
-  return null;
+  setTimeout(()=>{ const t=$("#m_type"); if(t){ previewSched(); } },30);
 }
 // 現在のプレビュー内容(=作成される部)を返す。
-// カスタムで前回引継ぎがある場合はその時刻を、無ければ計算テンプレを使う。
+//  - 標準種別: TEMPLATESの固定スケジュール
+//  - ユーザー定義カスタム種別(ct_xxx): そのテンプレの部構成
 function currentPreviewSessions(type){
-  if(type==="custom" && PREV_CUSTOM){
-    const n=Math.max(1,Math.min(12, parseInt(($("#m_bucount")||{}).value,10)||PREV_CUSTOM.length));
-    const out=[];
-    for(let i=0;i<n;i++){
-      if(i<PREV_CUSTOM.length){
-        const p=PREV_CUSTOM[i];
-        out.push({bu_no:i+1,start_time:p.start_time,end_time:p.end_time,
-          receipt_open:p.receipt_open,receipt_close:p.receipt_close,topic:null});
-      }else{
-        // 引継ぎ部数を超えた分は、最後の部の翌枠を計算で補う
-        const prev=out[i-1];
-        const ps=toMin(prev.start_time), pe=toMin(prev.end_time);
-        const dur=Math.max(30,pe-ps), st=pe+30, en=st+dur;
-        out.push({bu_no:i+1,start_time:toHM(st)+":00",end_time:toHM(en)+":00",
-          receipt_open:toHM(st-RECEIPT_BEFORE)+":00",receipt_close:toHM(en-RECEIPT_CUT)+":00",topic:null});
-      }
-    }
-    return out;
+  const ct=customTypeById(type);
+  if(ct){
+    return ct.sessions.map((s,i)=>({
+      bu_no:i+1, start_time:s.start_time, end_time:s.end_time,
+      receipt_open:s.receipt_open, receipt_close:s.receipt_close, topic:null
+    }));
   }
-  return buildSchedule(schedTemplateFor(type));
-}
-// 種別に応じたテンプレ。カスタムは入力された部数を反映。
-function schedTemplateFor(type){
-  const tpl=Object.assign({},TEMPLATES[type]);
-  if(type==="custom"){
-    const n=Math.max(1,Math.min(12, parseInt(($("#m_bucount")||{}).value,10)||tpl.bu));
-    tpl.bu=n;
-  }
-  return tpl;
+  return buildSchedule(TEMPLATES[type]||TEMPLATES.kojin_online);
 }
 function previewSched(){
   const type=$("#m_type").value;
-  const wrap=$("#m_bucount_wrap"); if(wrap) wrap.style.display = (type==="custom") ? "" : "none";
   const box=$("#m_sched"); if(!box) return;
   const v=$("#m_venue"); const tplOnline=TEMPLATES[type]?.online;
   if(v && tplOnline && v.value==="") v.value="俺ん家";
@@ -809,7 +779,7 @@ function renderEventDetail(el){
 
   let html=`<div class="row" style="margin:6px 0 14px">
     <button class="btn sm ghost" onclick="selectedEventId=null;detailMemberId=null;renderEvents()">\u2039 一覧</button>
-    <h2 style="font-size:17px;margin-left:6px">${esc(e.event_date)} ${EVENT_TYPE_LABEL[e.event_type]}</h2>
+    <h2 style="font-size:17px;margin-left:6px">${esc(e.event_date)} ${typeLabel(e.event_type)}</h2>
   </div>`;
 
   html+=`<div class="card"><div class="row">
@@ -985,9 +955,17 @@ async function delRelease(id){
    応募行動は「特定メンバーの部」が単位。メンバーを選んで集計する。
    ========================================================================= */
 let statsMemberId=null, statsType=null;   // null=未設定(データのある先頭種別を既定にする)
-// 種別の表示順(頻度順): 個別オンライン→全国オンライン→リアルミーグリ→個別握手会→カスタム
-const TYPE_ORDER=["kojin_online","zenkoku_online","real_meetgreet","kojin_akushu","custom"];
-function sortTypes(arr){ return [...arr].sort((a,b)=>TYPE_ORDER.indexOf(a)-TYPE_ORDER.indexOf(b)); }
+// 種別の表示順(頻度順): 個別オンライン→全国オンライン→リアルミーグリ→個別握手会→(カスタム各種)
+const TYPE_ORDER=["kojin_online","zenkoku_online","real_meetgreet","kojin_akushu"];
+function typeRank(t){
+  const i=TYPE_ORDER.indexOf(t);
+  if(i>=0) return i;
+  // カスタム類は標準種別の後ろ。ユーザー定義は SETTINGS 登録順、旧"custom"は最後。
+  if(t==="custom") return 100000;
+  const ci=(SETTINGS.customTypes||[]).findIndex(c=>c.id===t);
+  return ci>=0 ? (1000+ci) : 99999;
+}
+function sortTypes(arr){ return [...arr].sort((a,b)=>typeRank(a)-typeRank(b)); }
 function membersWithData(){
   // 応募データがあるメンバーのみ(なければオシ→全員)
   const ids=[...new Set(DB.applications.map(a=>a.member_id))];
@@ -1049,7 +1027,7 @@ function renderStats(){
       </select></div>
     <div class="field" style="margin-bottom:0"><label class="fld">種別</label>
       <select id="statsType" onchange="statsType=this.value;renderStats()">
-        ${types.map(k=>`<option value="${k}" ${statsType===k?"selected":""}>${esc(EVENT_TYPE_LABEL[k])}</option>`).join("")}
+        ${types.map(k=>`<option value="${k}" ${statsType===k?"selected":""}>${esc(typeLabel(k))}</option>`).join("")}
       </select></div>
   </div>`;
 
@@ -1154,7 +1132,7 @@ function renderSim(){
           ${rounds.map(r=>`<option value="${r}" ${r===simRound?"selected":""}>${r}次</option>`).join("")}</select></div>
       <div class="field" style="margin-bottom:0"><label class="fld">種別</label>
         <select id="simType" onchange="simType=this.value;simBuild()">
-          ${types.length?types.map(k=>`<option value="${k}" ${simType===k?"selected":""}>${esc(EVENT_TYPE_LABEL[k])}</option>`).join("")
+          ${types.length?types.map(k=>`<option value="${k}" ${simType===k?"selected":""}>${esc(typeLabel(k))}</option>`).join("")
               :`<option value="">(イベントなし)</option>`}</select></div>
     </div>
     <div id="simRows" style="margin-top:12px"></div>
@@ -1190,10 +1168,14 @@ function simBuild(){
   const repTime=v=>{ const e=Object.entries(v.times||{}); return e.length?e.sort((a,b)=>b[1]-a[1])[0][0]:""; };
 
   // 行(部)の構成:
-  //  - 標準種別: TEMPLATESの固定スケジュール(部数・時刻が定まっている)
-  //  - カスタム: 形が開催ごとに違うため、そのメンバーが実際に応募した部のみを実データから構成
+  //  - 標準種別: TEMPLATESの固定スケジュール
+  //  - ユーザー定義カスタム種別(ct_xxx): そのテンプレの部構成
+  //  - 旧"custom": テンプレが無いので、実際に応募した部のみを実データから構成
   let rowsSpec;
-  if(type==="custom"){
+  const ct=customTypeById(type);
+  if(ct){
+    rowsSpec=ct.sessions.map((s,i)=>({bu_no:i+1, k:s.start_time.slice(0,5)}));
+  }else if(type==="custom"){
     rowsSpec=Object.keys(byBu).map(Number).sort((a,b)=>a-b)
       .map(bu=>({bu_no:bu, k:repTime(byBu[bu])}));
     if(!rowsSpec.length){
@@ -1201,7 +1183,7 @@ function simBuild(){
       simCalc(); return;
     }
   }else{
-    rowsSpec=buildSchedule(TEMPLATES[type]).map(s=>({bu_no:s.bu_no, k:s.start_time.slice(0,5)}));
+    rowsSpec=buildSchedule(TEMPLATES[type]||TEMPLATES.kojin_online).map(s=>({bu_no:s.bu_no, k:s.start_time.slice(0,5)}));
   }
 
   box.innerHTML=rowsSpec.map((s)=>{
