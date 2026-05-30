@@ -102,15 +102,22 @@
     border-radius:var(--r2);padding:9px 11px;font-size:15px;width:100%;
   }
   input:focus,select:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px rgba(201,168,74,.15)}
-  /* iOS Safari: date/time 입력이 기본 폭으로 삐져나가는 것 방지 */
+  /* iOS Safari: date/time 입력の폭を他の入力欄に揃える。
+     ※ appearance:none は付けない(プレースホルダ '年/月/日' とカレンダーicon が消え、
+        タップ可能と分かりにくくなるため)。幅と高さだけ整える。 */
   input[type=date],input[type=time]{
-    -webkit-appearance:none;appearance:none;
-    min-width:0;max-width:100%;width:100%;
-    text-align:left;
+    width:100%;min-width:0;
+    min-height:42px;            /* 他のテキスト入力と同じ高さ感に */
+    line-height:1.4;
+    color:var(--txt);
   }
-  input[type=date]::-webkit-date-and-time-value{text-align:left;margin:0}
+  /* 値が空のときも「日付欄」と分かるよう、ピッカーアイコンを明るく */
   input[type=date]::-webkit-calendar-picker-indicator,
-  input[type=time]::-webkit-calendar-picker-indicator{margin-left:auto}
+  input[type=time]::-webkit-calendar-picker-indicator{
+    filter:invert(1) opacity(.55);
+    margin-left:auto;cursor:pointer;
+  }
+  input[type=date]::-webkit-date-and-time-value{text-align:left}
   label.fld{display:block;font-size:12px;color:var(--txt2);margin:0 0 5px 2px}
   .field{margin-bottom:12px}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
