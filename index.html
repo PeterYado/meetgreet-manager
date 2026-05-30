@@ -760,6 +760,7 @@ function renderEventDetail(el){
     <h3 style="color:var(--acc)">対象メンバー</h3>
     <div class="row" style="gap:8px">
       <select id="detailMember" onchange="changeDetailMember(this.value)" class="grow">
+        ${groupMembers.length===0?`<option value="__none" selected disabled>メンバー指定なし</option>`:""}
         ${groupMembers.map(m=>`<option value="${m.id}" ${m.id===detailMemberId?"selected":""}>${esc(m.name)}${m.is_oshi?" ★":""}</option>`).join("")}
         <option value="__new">＋ 新しいメンバー…</option>
       </select>
@@ -814,8 +815,9 @@ function renderEventDetail(el){
   el.innerHTML=html;
 }
 async function changeDetailMember(v){
+  if(v==="__none"){ return; }   // プレースホルダ選択時は何もしない
   if(v==="__new"){
-    const name=prompt("メンバー名を入力(例: 賀喜遥香)");
+    const name=prompt("メンバー名を入力(例: 遠藤さくら)");
     if(!name){ renderEvents(); return; }
     const gid=byId(DB.releases, byId(DB.events,selectedEventId).release_id).group_id;
     const m=await dbInsert("members",{group_id:gid,name:name.trim(),is_oshi:false,sort_order:DB.members.length});
