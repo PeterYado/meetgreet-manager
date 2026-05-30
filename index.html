@@ -1018,19 +1018,21 @@ function renderStats(){
       </select></div>
   </div>`;
 
-  // 集計: 対象メンバー × (種別) の時間帯別
-  const byStart={};
+  // 集計: 対象メンバー × 種別 の「部」別(種別を選べば部番号で一貫するため部単位で集計)
+  const byBu={};
   DB.sessions.forEach(s=>{
     const ev=byId(DB.events,s.event_id); if(!ev) return;
     if(statsType!=="all" && ev.event_type!==statsType) return;
     DB.applications.filter(a=>a.session_id===s.id && a.member_id===statsMemberId).forEach(a=>{
-      const key=s.start_time.slice(0,5);
-      (byStart[key]=byStart[key]||{applied:0,won:0,n:0});
-      byStart[key].applied+=a.applied||0; byStart[key].won+=a.won||0; byStart[key].n++;
+      (byBu[s.bu_no]=byBu[s.bu_no]||{applied:0,won:0,n:0,times:{}});
+      byBu[s.bu_no].applied+=a.applied||0; byBu[s.bu_no].won+=a.won||0; byBu[s.bu_no].n++;
+      const t=s.start_time.slice(0,5); byBu[s.bu_no].times[t]=(byBu[s.bu_no].times[t]||0)+1;
     });
   });
-  const rows=Object.entries(byStart).map(([t,v])=>({t,...v,rate:v.applied?v.won/v.applied:null}))
-    .filter(r=>r.applied>0).sort((a,b)=>toMin(a.t)-toMin(b.t));
+  // 各部の代表時刻(最も多く使われた開始時刻)
+  const repTime=v=>{ const e=Object.entries(v.times); if(!e.length) return ""; return e.sort((a,b)=>b[1]-a[1])[0][0]; };
+  const rows=Object.entries(byBu).map(([bu,v])=>({bu:+bu,t:repTime(v),...v,rate:v.applied?v.won/v.applied:null}))
+    .filter(r=>r.applied>0).sort((a,b)=>a.bu-b.bu);
 
   if(!rows.length){
     html+=`<div class="card"><div class="empty">この条件の応募データがありません。</div></div>`;
@@ -1038,19 +1040,19 @@ function renderStats(){
   }
   const best=rows.reduce((a,b)=>(b.rate>a.rate?b:a));
   html+=`<div class="card" style="border-color:var(--acc-d)">
-    <h3 style="color:var(--acc)">最も当たりやすい時間帯</h3>
-    <div style="font-size:26px;font-weight:700">${best.t} <span style="font-size:16px;color:var(--ok)">${Math.round(best.rate*100)}%</span></div>
-    <div class="dim" style="font-size:12px">${esc(memberName(statsMemberId))} の応募実績より。同じ応募枚数ならこの時間帯の部が有利な傾向です。</div></div>`;
+    <h3 style="color:var(--acc)">最も当たりやすい部</h3>
+    <div style="font-size:26px;font-weight:700">${best.bu}部 ${best.t?`<span style="font-size:15px;color:var(--txt2)">(${best.t})</span>`:""} <span style="font-size:16px;color:var(--ok)">${Math.round(best.rate*100)}%</span></div>
+    <div class="dim" style="font-size:12px">${esc(memberName(statsMemberId))} の応募実績より。同じ応募枚数ならこの部が有利な傾向です。</div></div>`;
 
   const max=Math.max(...rows.map(r=>r.rate));
-  html+=`<div class="card"><h3>時間帯別 当選率</h3>`;
+  html+=`<div class="card"><h3>部別 当選率</h3>`;
   rows.forEach(r=>{
     const pct=Math.round(r.rate*100);
     const col=r.rate>=.5?'var(--ok)':r.rate>=.3?'var(--warn)':'var(--danger)';
     html+=`<div style="margin:11px 0">
       <div class="row" style="font-size:13px;margin-bottom:4px">
-        <span style="font-weight:600;width:52px">${r.t}</span>
-        <span class="dim grow" style="font-size:12px">当選${r.won}/申請${r.applied} ・ ${r.n}部分</span>
+        <span style="font-weight:600;width:74px">${r.bu}部 ${r.t?`<span class="dim" style="font-weight:400">${r.t}</span>`:""}</span>
+        <span class="dim grow" style="font-size:12px">当選${r.won}/申請${r.applied} ・ ${r.n}件</span>
         <span style="font-weight:700;color:${col}">${pct}%</span></div>
       <div style="height:8px;background:var(--bg2);border-radius:6px;overflow:hidden">
         <div style="height:100%;width:${(r.rate/max*100).toFixed(0)}%;background:${col};border-radius:6px"></div></div>
@@ -1121,50 +1123,47 @@ function renderSim(){
       ${miniStat("期待当選","<span id='simExp'>0.0</span>枚")}
       ${miniStat("期待当選率","<span id='simRate'>—</span>")}
     </div>
-    <p class="dim" style="font-size:11px;margin:10px 0 0">当選率は選択メンバー・選択回次の歴代平均。回次×時間帯のデータが無い場合は「その回次の全体平均 → メンバー全体平均」の順で代用します。確率の目安です。</p>
+    <p class="dim" style="font-size:11px;margin:10px 0 0">当選率は選択メンバー・選択種別・選択回次の歴代実績(その部の実データ)のみで算出します。データの無い部は「データなし」と表示し、合計・期待当選の計算からは除外します。確率の目安です。</p>
   </div>`;
   el.innerHTML=html;
   simBuild();
 }
 function simBuild(){
-  const el=$("#tab-sim");
-  // 選択メンバー × 選択回次 の「時間帯別」当選率を集計
-  const byStart={};            // 回次×時間帯
-  let rA=0,rW=0;               // その回次の全体(時間帯fallback用)
-  let mA=0,mW=0;               // そのメンバー全体(最終fallback用)
+  const type=($("#simType")||{}).value||"real_meetgreet";
+  // 選択メンバー × 選択種別 × 選択回次 の「部」別当選率を集計(種別で完全に分離)
+  const byBu={};
   if(simMemberId){
     DB.sessions.forEach(s=>{
-      const k=s.start_time.slice(0,5);
-      DB.applications.filter(a=>a.session_id===s.id && a.member_id===simMemberId).forEach(a=>{
-        mA+=a.applied||0; mW+=a.won||0;
-        if(a.round===simRound){
-          (byStart[k]=byStart[k]||{applied:0,won:0});
-          byStart[k].applied+=a.applied||0; byStart[k].won+=a.won||0;
-          rA+=a.applied||0; rW+=a.won||0;
-        }
+      const ev=byId(DB.events,s.event_id); if(!ev) return;
+      if(ev.event_type!==type) return;                 // ★種別フィルタ(他種別を混ぜない)
+      DB.applications.filter(a=>a.session_id===s.id && a.member_id===simMemberId && a.round===simRound).forEach(a=>{
+        (byBu[s.bu_no]=byBu[s.bu_no]||{applied:0,won:0});
+        byBu[s.bu_no].applied+=a.applied||0; byBu[s.bu_no].won+=a.won||0;
       });
     });
   }
-  // fallback rate: その回次の全体平均 → メンバー全体平均 → 0.4
-  const roundRate = rA?rW/rA : (mA?mW/mA : 0.4);
-  const roundHasData = rA>0;
-
-  const tpl=TEMPLATES[($("#simType")||{}).value||"real_meetgreet"];
+  const tpl=TEMPLATES[type];
   const sched=buildSchedule(tpl);
   const box=$("#simRows"); if(!box) return;
   box.innerHTML=sched.map((s)=>{
     const k=s.start_time.slice(0,5);
-    const v=byStart[k];
-    let rate, src;
-    if(v&&v.applied){ rate=v.won/v.applied; src="exact"; }     // 回次×時間帯の実績
-    else if(roundHasData){ rate=roundRate; src="round"; }       // その回次の全体平均
-    else { rate=roundRate; src="member"; }                      // メンバー全体平均
+    const v=byBu[s.bu_no];
+    const hasData = !!(v && v.applied);
+    const rate = hasData ? v.won/v.applied : null;
+    if(!hasData){
+      // データなし: 期待計算に含めない(data-rate を付けない)
+      return `<div class="row" style="padding:9px 0;border-bottom:1px solid var(--line);gap:10px;opacity:.65" data-nodata="1">
+        <div style="width:70px"><div style="font-weight:600">${s.bu_no}部</div><div class="dim" style="font-size:11px">${k}</div></div>
+        <input type="number" min="0" value="3" style="width:62px;text-align:center;padding:6px" disabled class="simInput">
+        <span style="font-size:12px;color:var(--txt3);width:104px">データなし</span>
+        <span class="grow" style="text-align:right;font-weight:700;color:var(--txt3)">期待 —</span>
+      </div>`;
+    }
     const col=rate>=.5?'var(--ok)':rate>=.3?'var(--warn)':'var(--danger)';
-    const note = src==="exact" ? "" : (src==="round" ? " <span class='dim'>(回次平均)</span>" : " <span class='dim'>(平均)</span>");
     return `<div class="row" style="padding:9px 0;border-bottom:1px solid var(--line);gap:10px" data-rate="${rate}">
       <div style="width:70px"><div style="font-weight:600">${s.bu_no}部</div><div class="dim" style="font-size:11px">${k}</div></div>
-      <input type="number" min="0" value="2" style="width:62px;text-align:center;padding:6px" oninput="simCalc()" class="simInput">
-      <span style="font-size:12px;color:${col};width:104px">当選率 ${Math.round(rate*100)}%${note}</span>
+      <input type="number" min="0" value="3" style="width:62px;text-align:center;padding:6px" oninput="simCalc()" class="simInput">
+      <span style="font-size:12px;color:${col};width:104px">当選率 ${Math.round(rate*100)}%</span>
       <span class="grow" style="text-align:right;font-weight:700">期待 <span class="expCell">0.0</span></span>
     </div>`;
   }).join("");
@@ -1174,6 +1173,7 @@ function simCalc(){
   const rows=document.querySelectorAll("#simRows .row");
   let totA=0,totE=0;
   rows.forEach(r=>{
+    if(r.dataset.nodata) return;                  // データなしの部は合計に含めない
     const rate=+r.dataset.rate; const v=+r.querySelector(".simInput").value||0;
     const e=v*rate; totA+=v; totE+=e;
     r.querySelector(".expCell").textContent=e.toFixed(1);
