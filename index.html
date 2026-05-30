@@ -522,10 +522,11 @@ function renderHome(){
   // --- 設定/バックアップ ---
   html+=`<div class="card"><h3>設定・バックアップ</h3>
     <div class="row" style="gap:8px;flex-wrap:wrap">
+      <button class="btn sm ghost" onclick="openDataEditor()">\u{1F5C2}\uFE0F データ編集</button>
       <button class="btn sm ghost" onclick="exportJSON()">\u{1F4E5} JSONバックアップ</button>
       <button class="btn sm ghost" onclick="logout()" style="margin-left:auto">ログアウト</button>
     </div>
-    <p class="dim" style="font-size:11px;margin:10px 0 0">データはSupabaseに自動保存。別端末では同じアカウントでログイン→再読み込みで最新が反映されます。</p>
+    <p class="dim" style="font-size:11px;margin:10px 0 0">データはSupabaseに自動保存。別端末では同じアカウントでログイン→再読み込みで最新が反映されます。グループ・メンバーの修正/削除は「データ編集」から。</p>
   </div>`;
 
   el.innerHTML=html;
@@ -1104,6 +1105,108 @@ function openModal(title,bodyHtml,onOk){
       if(activeTab==="events")renderEvents(); if(activeTab==="home")renderHome(); }
   };
   wrap.onclick=e=>{ if(e.target===wrap) close(); };
+}
+
+/* =========================================================================
+   データ編集(グループ/メンバーの 改名・オシ変更・削除)
+   使用頻度の低い管理機能なので常時表示せず、設定カードから開く。
+   ========================================================================= */
+function openDataEditor(){
+  openModal("データ編集", dataEditorBody(), async()=>true);
+  // 保存ボタンは使わないので「閉じる」だけで完結。OKは no-op。
+  const ok=document.getElementById("mOk"); if(ok) ok.style.display="none";
+}
+function dataEditorBody(){
+  const groups=DB.groups.sort((a,b)=>a.sort_order-b.sort_order);
+  if(!groups.length){
+    return `<div class="empty">グループがありません。「記録」からリリースを追加すると作成されます。</div>`;
+  }
+  let h=`<p class="dim" style="font-size:11px;margin:0 0 12px">グループ名・メンバー名の修正、オシ(★)指定、不要なデータの削除ができます。削除は元に戻せません。</p>`;
+  groups.forEach(g=>{
+    const mem=membersOfGroup(g.id);
+    const relCount=DB.releases.filter(r=>r.group_id===g.id).length;
+    h+=`<div style="border:1px solid var(--line2);border-radius:var(--r2);padding:12px;margin-bottom:12px">
+      <div class="row" style="gap:6px;margin-bottom:8px">
+        <input type="text" value="${esc(g.name)}" id="ge_${g.id}" style="font-size:14px;font-weight:600;padding:7px 9px"
+          onchange="renameGroup('${g.id}',this.value)">
+        <button class="btn sm ghost danger" style="white-space:nowrap" onclick="deleteGroup('${g.id}')">グループ削除</button>
+      </div>
+      <div class="dim" style="font-size:11px;margin-bottom:8px">リリース ${relCount}件 ・ メンバー ${mem.length}名</div>`;
+    // メンバー一覧
+    if(mem.length){
+      mem.forEach(m=>{
+        h+=`<div class="row" style="gap:6px;padding:4px 0">
+          <button class="btn sm ghost" style="padding:5px 8px;${m.is_oshi?'color:var(--acc);border-color:var(--acc-d)':''}"
+            title="オシ指定の切替" onclick="toggleOshi('${m.id}')">${m.is_oshi?"★":"☆"}</button>
+          <input type="text" value="${esc(m.name)}" id="me_${m.id}" class="grow" style="font-size:13px;padding:6px 9px"
+            onchange="renameMember('${m.id}',this.value)">
+          <button class="btn sm ghost danger" style="padding:5px 9px" onclick="deleteMember('${m.id}')">×</button>
+        </div>`;
+      });
+    }else{
+      h+=`<div class="dim" style="font-size:12px;padding:4px 0">メンバーなし</div>`;
+    }
+    h+=`</div>`;
+  });
+  return h;
+}
+// データ編集モーダルを開いたまま中身だけ描き直す
+function refreshDataEditor(){
+  const body=document.getElementById("mBody");
+  if(body) body.innerHTML=dataEditorBody();
+}
+
+async function renameGroup(id,name){
+  name=name.trim(); if(!name){ toast("グループ名を入力してください"); refreshDataEditor(); return; }
+  const g=byId(DB.groups,id); g.name=name; await dbUpdate("groups",id,{name});
+  toast("グループ名を更新しました");
+}
+async function renameMember(id,name){
+  name=name.trim(); if(!name){ toast("メンバー名を入力してください"); refreshDataEditor(); return; }
+  const m=byId(DB.members,id); m.name=name; await dbUpdate("members",id,{name});
+  toast("メンバー名を更新しました");
+}
+async function toggleOshi(id){
+  const m=byId(DB.members,id); const next=!m.is_oshi;
+  m.is_oshi=next; await dbUpdate("members",id,{is_oshi:next});
+  refreshDataEditor();
+}
+async function deleteMember(id){
+  const m=byId(DB.members,id); if(!m) return;
+  const appCount=DB.applications.filter(a=>a.member_id===id).length;
+  const msg = appCount
+    ? `「${m.name}」と、このメンバーの応募/当選 記録 ${appCount}件 を削除します。元に戻せません。よろしいですか?`
+    : `「${m.name}」を削除します。よろしいですか?`;
+  if(!confirm(msg)) return;
+  await dbDelete("members",id);   // applications は FK cascade で自動削除
+  DB.members=DB.members.filter(x=>x.id!==id);
+  DB.applications=DB.applications.filter(a=>a.member_id!==id);
+  toast("メンバーを削除しました");
+  refreshDataEditor();
+}
+async function deleteGroup(id){
+  const g=byId(DB.groups,id); if(!g) return;
+  const rels=DB.releases.filter(r=>r.group_id===id);
+  const relIds=rels.map(r=>r.id);
+  const evs=DB.events.filter(e=>relIds.includes(e.release_id));
+  const evIds=evs.map(e=>e.id);
+  const sids=DB.sessions.filter(s=>evIds.includes(s.event_id)).map(s=>s.id);
+  const appCount=DB.applications.filter(a=>sids.includes(a.session_id)).length;
+  const msg=`グループ「${g.name}」を削除します。\n配下のリリース ${rels.length}件・開催日 ${evs.length}件・応募記録 ${appCount}件・メンバー情報 もすべて削除されます。\n元に戻せません。本当に削除しますか?`;
+  if(!confirm(msg)) return;
+  await dbDelete("groups",id);   // releases/events/sessions/applications/members は cascade
+  // ローカルも整合させる
+  DB.applications=DB.applications.filter(a=>!sids.includes(a.session_id));
+  DB.sessions=DB.sessions.filter(s=>!evIds.includes(s.event_id));
+  DB.events=DB.events.filter(e=>!relIds.includes(e.release_id));
+  DB.releases=DB.releases.filter(r=>r.group_id!==id);
+  DB.members=DB.members.filter(m=>m.group_id!==id);
+  DB.groups=DB.groups.filter(x=>x.id!==id);
+  // 選択中の状態が消えた可能性 → リセット
+  selectedReleaseId=null; selectedEventId=null; detailMemberId=null;
+  statsMemberId=null; simMemberId=null;
+  toast("グループを削除しました");
+  refreshDataEditor();
 }
 
 function exportJSON(){
