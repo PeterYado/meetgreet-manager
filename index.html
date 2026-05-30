@@ -221,7 +221,7 @@ const EVENT_TYPE_LABEL={
 /* ---------- グローバル状態 ---------- */
 let sb=null, USER=null;
 const DB={ groups:[],members:[],releases:[],events:[],sessions:[],applications:[] };
-let SETTINGS={ yearGoal:0 };
+let SETTINGS={ yearGoal:0, customTypes:[] };   // customTypes: ユーザー定義の種別テンプレ
 let activeTab="home";
 let selectedReleaseId=null, selectedEventId=null;
 
@@ -253,7 +253,8 @@ async function loadAll(){
     DB[t]=data||[];
   }
   const {data:st}=await sb.from(tbl("app_settings")).select("data").eq("user_id",USER.id).maybeSingle();
-  if(st&&st.data) SETTINGS=Object.assign({yearGoal:0},st.data);
+  if(st&&st.data) SETTINGS=Object.assign({yearGoal:0,customTypes:[]},st.data);
+  if(!Array.isArray(SETTINGS.customTypes)) SETTINGS.customTypes=[];
   setSync("ok"); 
   return true;
 }
@@ -1304,9 +1305,33 @@ function dataEditorBody(){
     }else{
       h+=`<div class="dim" style="font-size:12px;padding:4px 0">メンバーなし</div>`;
     }
+    // --- カスタム種別(ユーザー定義テンプレ) ---
+    const cts=customTypesOfGroup(g.id);
+    h+=`<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">
+      <div class="dim" style="font-size:11px;margin-bottom:6px">カスタム種別(進行スケジュールのテンプレ)</div>`;
+    if(cts.length){
+      cts.forEach(ct=>{
+        h+=`<div class="row" style="gap:6px;padding:4px 0">
+          <span class="grow" style="font-size:13px">${esc(ct.name)} <span class="dim">(${ct.sessions.length}部)</span></span>
+          <button class="btn sm ghost" style="padding:5px 9px" onclick="editCustomType('${g.id}','${ct.id}')">編集</button>
+          <button class="btn sm ghost danger" style="padding:5px 9px" onclick="deleteCustomType('${g.id}','${ct.id}')">×</button>
+        </div>`;
+      });
+    }else{
+      h+=`<div class="dim" style="font-size:12px;padding:2px 0">なし</div>`;
+    }
+    h+=`<button class="btn sm ghost" style="margin-top:6px" onclick="editCustomType('${g.id}',null)">＋ カスタム種別を追加</button>
+      </div>`;
     h+=`</div>`;
   });
   return h;
+}
+// グループに属するカスタム種別テンプレ一覧
+function customTypesOfGroup(gid){
+  return (SETTINGS.customTypes||[]).filter(c=>c.group_id===gid);
+}
+function customTypeById(id){
+  return (SETTINGS.customTypes||[]).find(c=>c.id===id)||null;
 }
 // データ編集モーダルを開いたまま中身だけ描き直す
 function refreshDataEditor(){
@@ -1364,6 +1389,100 @@ async function deleteGroup(id){
   selectedReleaseId=null; selectedEventId=null; detailMemberId=null;
   statsMemberId=null; simMemberId=null;
   toast("グループを削除しました");
+  refreshDataEditor();
+}
+
+/* ---------- カスタム種別テンプレ(データ編集内) ---------- */
+let _ctEditGid=null, _ctEditId=null, _ctBu=3;
+function editCustomType(gid, ctId){
+  _ctEditGid=gid; _ctEditId=ctId;
+  const ct = ctId ? customTypeById(ctId) : null;
+  const name = ct ? ct.name : "";
+  _ctBu = ct ? ct.sessions.length : 3;
+  const initSessions = ct ? ct.sessions : buildSchedule(Object.assign({},TEMPLATES.custom,{bu:_ctBu}));
+  _ctTmpSessions = initSessions.map(s=>({
+    start_time:s.start_time, end_time:s.end_time,
+    receipt_open:s.receipt_open, receipt_close:s.receipt_close
+  }));
+  openModal(ctId?"カスタム種別を編集":"カスタム種別を追加", customTypeBody(name), async()=>{
+    const nm=$("#ct_name").value.trim(); if(!nm){toast("名前を入力してください");return false;}
+    // 入力値を回収
+    const sessions=_ctTmpSessions.map((s,i)=>({
+      bu_no:i+1,
+      start_time:($("#ct_st_"+i)?.value||s.start_time.slice(0,5))+":00",
+      end_time:($("#ct_en_"+i)?.value||s.end_time.slice(0,5))+":00",
+      receipt_open:($("#ct_ro_"+i)?.value||s.receipt_open.slice(0,5))+":00",
+      receipt_close:($("#ct_rc_"+i)?.value||s.receipt_close.slice(0,5))+":00"
+    }));
+    if(ctId){
+      const c=customTypeById(ctId); c.name=nm; c.sessions=sessions;
+    }else{
+      SETTINGS.customTypes.push({id:"ct_"+Math.random().toString(36).slice(2,9), group_id:gid, name:nm, sessions});
+    }
+    await saveSettings();
+    toast(ctId?"カスタム種別を更新しました":"カスタム種別を追加しました");
+    refreshDataEditor();
+    return true;
+  });
+  setTimeout(ctRenderRows, 30);   // モーダル描画後に各部の時刻行を構成
+}
+let _ctTmpSessions=[];
+function customTypeBody(name){
+  let h=`<div class="field"><label class="fld">名前(例: 個別握手会6部 / オンミグ8部)</label>
+    <input type="text" id="ct_name" placeholder="個別握手会6部" value="${esc(name)}"></div>
+    <div class="field"><label class="fld">部数</label>
+      <input type="number" id="ct_bu" min="1" max="12" value="${_ctBu}" onchange="ctChangeBu(this.value)" oninput="ctChangeBu(this.value)"></div>
+    <div class="field" style="margin-bottom:0"><label class="fld">各部の時刻(開始/終了/受付開始/受付締切)</label>
+      <div id="ct_rows"></div></div>`;
+  return h;
+}
+// 部数変更時に行を再構成(既存入力はできるだけ保持、超過分は計算補完)
+function ctChangeBu(v){
+  const n=Math.max(1,Math.min(12,parseInt(v,10)||1));
+  // 現在のDOM値を _ctTmpSessions に取り込む
+  _ctTmpSessions=_ctTmpSessions.map((s,i)=>({
+    start_time:($("#ct_st_"+i)?.value||s.start_time.slice(0,5))+":00",
+    end_time:($("#ct_en_"+i)?.value||s.end_time.slice(0,5))+":00",
+    receipt_open:($("#ct_ro_"+i)?.value||s.receipt_open.slice(0,5))+":00",
+    receipt_close:($("#ct_rc_"+i)?.value||s.receipt_close.slice(0,5))+":00"
+  }));
+  if(n>_ctTmpSessions.length){
+    for(let i=_ctTmpSessions.length;i<n;i++){
+      const prev=_ctTmpSessions[i-1];
+      const ps=toMin(prev.start_time), pe=toMin(prev.end_time);
+      const dur=Math.max(30,pe-ps), st=pe+30, en=st+dur;
+      _ctTmpSessions.push({start_time:toHM(st)+":00",end_time:toHM(en)+":00",
+        receipt_open:toHM(st-RECEIPT_BEFORE)+":00",receipt_close:toHM(en-RECEIPT_CUT)+":00"});
+    }
+  }else{
+    _ctTmpSessions=_ctTmpSessions.slice(0,n);
+  }
+  ctRenderRows();
+}
+function ctRenderRows(){
+  const box=$("#ct_rows"); if(!box) return;
+  box.innerHTML=_ctTmpSessions.map((s,i)=>`
+    <div style="border:1px solid var(--line);border-radius:8px;padding:8px;margin-bottom:6px">
+      <div style="font-weight:600;font-size:13px;margin-bottom:6px">${i+1}部</div>
+      <div class="grid2">
+        <div class="field" style="margin-bottom:6px"><label class="fld">開始</label>${timeField("ct_st_"+i,s.start_time.slice(0,5),"--:--")}</div>
+        <div class="field" style="margin-bottom:6px"><label class="fld">終了</label>${timeField("ct_en_"+i,s.end_time.slice(0,5),"--:--")}</div>
+        <div class="field" style="margin-bottom:0"><label class="fld">受付開始</label>${timeField("ct_ro_"+i,s.receipt_open.slice(0,5),"--:--")}</div>
+        <div class="field" style="margin-bottom:0"><label class="fld">受付締切</label>${timeField("ct_rc_"+i,s.receipt_close.slice(0,5),"--:--")}</div>
+      </div>
+    </div>`).join("");
+}
+async function deleteCustomType(gid, ctId){
+  const ct=customTypeById(ctId); if(!ct) return;
+  // この種別で作られた開催日があるか
+  const usedCount=DB.events.filter(e=>e.event_type===ctId).length;
+  const msg=usedCount
+    ? `カスタム種別「${ct.name}」を削除します。\nこの種別で作成済みの開催日 ${usedCount}件 はそのまま残りますが、種別名は表示されなくなります。よろしいですか?`
+    : `カスタム種別「${ct.name}」を削除します。よろしいですか?`;
+  if(!confirm(msg)) return;
+  SETTINGS.customTypes=SETTINGS.customTypes.filter(c=>c.id!==ctId);
+  await saveSettings();
+  toast("カスタム種別を削除しました");
   refreshDataEditor();
 }
 
