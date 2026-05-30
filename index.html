@@ -317,12 +317,21 @@ const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&
 function dateField(id, value, placeholder){
   const v=value||"";
   const disp=v?formatDateDisp(v):(placeholder||"日付を選択");
+  const ph=esc(placeholder||"日付を選択");
   return `<div class="datewrap">
-    <input type="date" id="${id}" value="${v}" oninput="syncDateDisp('${id}','${esc(placeholder||"日付を選択")}')">
+    <input type="date" id="${id}" value="${v}"
+      onclick="openPicker(this)"
+      oninput="syncDateDisp('${id}','${ph}')"
+      onchange="syncDateDisp('${id}','${ph}')">
     <div class="datedisp ${v?"":"empty"}" id="${id}_disp">
       <span class="txt">${esc(disp)}</span><span class="cal">\u{1F4C5}</span>
     </div>
   </div>`;
+}
+// PC Chrome は input 本体クリックでカレンダーが開かないため showPicker() を明示呼び出し
+function openPicker(inp){
+  try{ if(typeof inp.showPicker==="function") inp.showPicker(); }
+  catch(e){ /* ユーザー操作外などで弾かれた場合は何もしない(focusで代替) */ }
 }
 function formatDateDisp(ymd){
   // YYYY-MM-DD → YYYY年M月D日(曜)
