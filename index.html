@@ -88,6 +88,12 @@
   .pill.close{background:var(--dangerbg);color:var(--danger)}
   .pill.info{background:var(--infobg);color:var(--info)}
   .pill.gold{background:#332a12;color:var(--acc)}
+  /* 種別バッジ色: オンライン系=寒色, 現場系=暖色, カスタム=中立 */
+  .pill.t-kojin_online{background:#102a3a;color:#6fb6e0}    /* 個別オンライン: 青 */
+  .pill.t-zenkoku_online{background:#0e2f2c;color:#5fc6b4}  /* 全国オンライン: 青緑 */
+  .pill.t-real_meetgreet{background:#3a2410;color:#e0a05f}  /* リアルミーグリ: 橙 */
+  .pill.t-kojin_akushu{background:#3a1518;color:#e07a86}    /* 個別握手会: 赤系 */
+  .pill.t-custom{background:#2a1f3a;color:#b08fe0}          /* カスタム(ユーザー定義/旧): 紫 */
   .btn{background:var(--card2);border:1px solid var(--line2);color:var(--txt);padding:9px 14px;border-radius:var(--r2);font-size:14px;font-weight:500;transition:.15s}
   .btn:hover{background:#30304a}
   .btn:active{transform:scale(.97)}
@@ -226,6 +232,11 @@ function typeLabel(type){
   return ct ? ct.name : "カスタム";
 }
 function isCustomType(type){ return type==="custom" || (type||"").startsWith("ct_"); }
+// 種別 → バッジ色クラス。標準種別は固定色、カスタム(ユーザー定義/旧)は共通の紫。
+function typePillClass(type){
+  if(isCustomType(type)) return "t-custom";
+  return "t-"+type;
+}
 
 /* ---------- グローバル状態 ---------- */
 let sb=null, USER=null;
@@ -633,7 +644,7 @@ function renderEvents(){
         return `<div class="row" style="padding:8px 0;cursor:pointer" onclick="openEvent('${e.id}')">
           <div class="grow">
             <span style="font-weight:600">${esc(e.event_date)}</span>
-            <span class="pill gold" style="margin-left:6px">${typeLabel(e.event_type)}</span>
+            <span class="pill ${typePillClass(e.event_type)}" style="margin-left:6px">${typeLabel(e.event_type)}</span>
           </div>
           <span class="dim" style="font-size:12px">${esc(e.venue||"")} ${won?`・${won}枚`:""}</span>
           <span class="dim" style="margin-left:8px">\u203A</span>
