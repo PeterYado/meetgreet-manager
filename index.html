@@ -273,7 +273,7 @@ function typePillClass(type){
 let sb=null, USER=null;
 const DB={ groups:[],members:[],releases:[],events:[],sessions:[],applications:[],
            comp_tickets:[],release_members:[] };
-let SETTINGS={ yearGoal:0, customTypes:[] };   // customTypes: ユーザー定義の種別テンプレ
+let SETTINGS={ yearGoal:0, customTypes:[], typeRules:{} };  // customTypes: ユーザー定義の種別テンプレ / typeRules: 種別ごとの上限・単価
 let activeTab="home";
 let selectedReleaseId=null, selectedEventId=null;
 
@@ -306,8 +306,9 @@ async function loadAll(){
     DB[t]=data||[];
   }
   const {data:st}=await sb.from(tbl("app_settings")).select("data").eq("user_id",USER.id).maybeSingle();
-  if(st&&st.data) SETTINGS=Object.assign({yearGoal:0,customTypes:[]},st.data);
+  if(st&&st.data) SETTINGS=Object.assign({yearGoal:0,customTypes:[],typeRules:{}},st.data);
   if(!Array.isArray(SETTINGS.customTypes)) SETTINGS.customTypes=[];
+  if(!SETTINGS.typeRules || typeof SETTINGS.typeRules!=="object") SETTINGS.typeRules={};
   setSync("ok"); 
   return true;
 }
@@ -1089,6 +1090,74 @@ async function delRelease(id){
 
 
 /* =========================================================================
+   種別ごとの制度差(支払いの向き・当選上限・単価)
+   個別      : 当選した枚数だけ後から 1200円 の CD を買う。当選上限なし。
+               (代わりに回次ごとの申請上限がある)
+   全国/リアル: 先に CD を買い、同梱シリアルで応募する。申請上限は無いが
+               1部あたりの当選上限があり、超えて入れた分はそのまま無駄になる。
+   ルールは稀に変わるのでデータで持ち、データ編集から変更できるようにする。
+   ========================================================================= */
+const TYPE_RULES_DEFAULT={
+  kojin_online:   {payment:"post", unitPrice:1200, winCap:null},
+  kojin_akushu:   {payment:"post", unitPrice:1200, winCap:null},
+  zenkoku_online: {payment:"pre",  unitPrice:1653, winCap:10},
+  real_meetgreet: {payment:"pre",  unitPrice:1653, winCap:10},
+  custom:         {payment:"post", unitPrice:null, winCap:null}
+};
+function typeRule(type){
+  const ct=customTypeById(type);
+  if(ct) return Object.assign({payment:"post",unitPrice:null,winCap:null}, ct.rule||{});
+  return Object.assign({}, TYPE_RULES_DEFAULT[type]||TYPE_RULES_DEFAULT.custom,
+                       (SETTINGS.typeRules||{})[type]||{});
+}
+// 上限に届かせるのに要る枚数。上限が無い/実績が無いときは null。
+function needForCap(rate,cap){
+  return (cap!=null && rate>0) ? Math.ceil(cap/rate) : null;
+}
+const yen=n=>"¥"+Math.round(n).toLocaleString("ja-JP");
+
+/* ---------- 種別の設定エディタ(データ編集の先頭に1回だけ) ---------- */
+function typeRulesEditorHtml(){
+  const keys=["kojin_online","kojin_akushu","zenkoku_online","real_meetgreet"];
+  return `<div style="border:1px solid var(--line2);border-radius:var(--r2);padding:12px;margin-bottom:12px">
+    <div class="dim" style="font-size:11px;margin-bottom:8px">種別の設定(当選上限・単価・支払い)</div>
+    ${keys.map(k=>{
+      const r=typeRule(k);
+      return `<div style="padding:6px 0;border-bottom:1px solid var(--line)">
+        <div style="font-size:13px;font-weight:600;margin-bottom:5px">${esc(EVENT_TYPE_LABEL[k])}</div>
+        <div class="row" style="gap:6px">
+          <span class="dim" style="font-size:11px;width:56px">当選上限</span>
+          <input type="number" id="tr_cap_${k}" min="0" placeholder="なし" value="${r.winCap??""}"
+            style="width:74px;padding:5px;font-size:13px">
+          <span class="dim" style="font-size:11px;width:34px">単価</span>
+          <input type="number" id="tr_pr_${k}" min="0" value="${r.unitPrice??""}"
+            style="width:82px;padding:5px;font-size:13px">
+          <select id="tr_pay_${k}" style="padding:5px;font-size:13px;width:auto">
+            <option value="post" ${r.payment==="post"?"selected":""}>後払い</option>
+            <option value="pre"  ${r.payment==="pre" ?"selected":""}>先払い</option>
+          </select>
+        </div></div>`;
+    }).join("")}
+    <p class="dim" style="font-size:11px;margin:8px 0 6px">先払い(全国/リアル)は落選するとCD代が無駄になるため、応募計算で過剰分の金額を出します。当選上限を空にすると上限なしとして扱います。</p>
+    <button class="btn sm ghost" onclick="saveTypeRules()">種別の設定を保存</button>
+  </div>`;
+}
+async function saveTypeRules(){
+  const keys=["kojin_online","kojin_akushu","zenkoku_online","real_meetgreet"];
+  const out={};
+  keys.forEach(k=>{
+    const cap=document.getElementById("tr_cap_"+k).value.trim();
+    const pr =document.getElementById("tr_pr_"+k).value.trim();
+    out[k]={ winCap: cap===""?null:+cap,
+             unitPrice: pr===""?null:+pr,
+             payment: document.getElementById("tr_pay_"+k).value };
+  });
+  SETTINGS.typeRules=out;
+  await saveSettings();
+  toast("種別の設定を保存しました");
+}
+
+/* =========================================================================
    週次の申込サイクル
    乃木坂の個別ミーグリは週単位で回る。木15:00に申込が開き、金14:00に締切、
    金18:00以降に当落発表。翌週の木にまた開く ——「回次」はこの週の順番。
@@ -1665,20 +1734,31 @@ function renderStats(){
   </div>`;
 
   // 集計: 対象メンバー × 種別 の「部」別
+  // 当選上限がある種別(全国/リアル)では、上限に届いた行から本当の当選率は読めない。
+  // 「20枚入れて10枚当選」は50%に見えるが、実際は100%を上限で切られただけかもしれない。
+  // そういう行(打ち止め)を分けて集計し、率は打ち止めでない行から出す。
+  const statCap=typeRule(statsType).winCap;
   const byBu={};
   DB.sessions.forEach(s=>{
     const ev=byId(DB.events,s.event_id); if(!ev) return;
     if(ev.event_type!==statsType) return;
     DB.applications.filter(a=>a.session_id===s.id && a.member_id===statsMemberId && !isComp(a)).forEach(a=>{
-      (byBu[s.bu_no]=byBu[s.bu_no]||{applied:0,won:0,n:0,times:{}});
-      byBu[s.bu_no].applied+=a.applied||0; byBu[s.bu_no].won+=a.won||0; byBu[s.bu_no].n++;
-      const t=s.start_time.slice(0,5); byBu[s.bu_no].times[t]=(byBu[s.bu_no].times[t]||0)+1;
+      const v=(byBu[s.bu_no]=byBu[s.bu_no]||{applied:0,won:0,n:0,cap:0,uApplied:0,uWon:0,times:{}});
+      v.applied+=a.applied||0; v.won+=a.won||0; v.n++;
+      if(statCap!=null && (a.won||0)>=statCap) v.cap++;                       // 打ち止め
+      else { v.uApplied+=a.applied||0; v.uWon+=a.won||0; }                    // 率に使える行
+      const t=s.start_time.slice(0,5); v.times[t]=(v.times[t]||0)+1;
     });
   });
   // 各部の代表時刻(最も多く使われた開始時刻)
   const repTime=v=>{ const e=Object.entries(v.times); if(!e.length) return ""; return e.sort((a,b)=>b[1]-a[1])[0][0]; };
-  const rows=Object.entries(byBu).map(([bu,v])=>({bu:+bu,t:repTime(v),...v,rate:v.applied?v.won/v.applied:null}))
-    .filter(r=>r.applied>0).sort((a,b)=>a.bu-b.bu);
+  const rows=Object.entries(byBu).map(([bu,v])=>{
+    // 打ち止めの行しか無い部は、率ではなく下限(「これ以上」)しか言えない
+    const bound=v.uApplied===0 && v.cap>0;
+    const rate = v.uApplied ? v.uWon/v.uApplied : (v.applied? v.won/v.applied : null);
+    return {bu:+bu,t:repTime(v),...v,rate,bound};
+  }).filter(r=>r.applied>0 && r.rate!=null).sort((a,b)=>a.bu-b.bu);
+  const capHits=rows.reduce((n,r)=>n+r.cap,0);
 
   if(!rows.length){
     html+=`<div class="card"><div class="empty">この条件の応募データがありません。</div></div>`;
@@ -1687,7 +1767,7 @@ function renderStats(){
   const best=rows.reduce((a,b)=>(b.rate>a.rate?b:a));
   html+=`<div class="card" style="border-color:var(--acc-d)">
     <h3 style="color:var(--acc)">最も当たりやすい部</h3>
-    <div style="font-size:26px;font-weight:700">${best.bu}部 ${best.t?`<span style="font-size:15px;color:var(--txt2)">(${best.t})</span>`:""} <span style="font-size:16px;color:var(--ok)">${Math.round(best.rate*100)}%</span></div>
+    <div style="font-size:26px;font-weight:700">${best.bu}部 ${best.t?`<span style="font-size:15px;color:var(--txt2)">(${best.t})</span>`:""} <span style="font-size:16px;color:var(--ok)">${best.bound?"≥":""}${Math.round(best.rate*100)}%</span></div>
     <div class="dim" style="font-size:12px">${esc(memberName(statsMemberId))} の応募実績より。同じ応募枚数ならこの部が有利な傾向です。</div></div>`;
 
   const max=Math.max(...rows.map(r=>r.rate));
@@ -1698,30 +1778,37 @@ function renderStats(){
     html+=`<div style="margin:11px 0">
       <div class="row" style="font-size:13px;margin-bottom:4px">
         <span style="font-weight:600;width:74px">${r.bu}部 ${r.t?`<span class="dim" style="font-weight:400">${r.t}</span>`:""}</span>
-        <span class="dim grow" style="font-size:12px">当選${r.won}/申請${r.applied} ・ ${r.n}件</span>
-        <span style="font-weight:700;color:${col}">${pct}%</span></div>
+        <span class="dim grow" style="font-size:12px">当選${r.won}/申請${r.applied} ・ ${r.n}件${r.cap?` ・ <span style="color:var(--warn)">打ち止め${r.cap}件</span>`:""}</span>
+        <span style="font-weight:700;color:${col}">${r.bound?"≥":""}${pct}%</span></div>
       <div style="height:8px;background:var(--bg2);border-radius:6px;overflow:hidden">
         <div style="height:100%;width:${(r.rate/max*100).toFixed(0)}%;background:${col};border-radius:6px"></div></div>
     </div>`;
   });
+  if(capHits) html+=`<p class="dim" style="font-size:11px;margin:10px 0 0">この種別は1部あたり当選 ${statCap}枚 が上限です。上限に届いた回(打ち止め)は本当の当選率が読めないため、率の計算からは外しています。「≥」は下限しか出せない部です。</p>`;
   html+=`</div>`;
 
   // 回次別 当選率(対象メンバー)
   html+=`<div class="card"><h3>回次別 当選率 <span class="dim" style="font-weight:400;font-size:12px;text-transform:none">(${esc(memberName(statsMemberId))})</span></h3>`;
   const byRound={};
   DB.applications.filter(a=>a.member_id===statsMemberId && !isComp(a)).forEach(a=>{
-    const ev=byId(DB.events, (byId(DB.sessions,a.session_id)||{}).event_id);
-    if(ev && ev.event_type!==statsType) return;
-    (byRound[a.round]=byRound[a.round]||{applied:0,won:0});byRound[a.round].applied+=a.applied||0;byRound[a.round].won+=a.won||0;
+    // 部未指定の行(過去データ移行分)は event_id 側から種別を引く
+    const s=byId(DB.sessions,a.session_id);
+    const ev=byId(DB.events, s?s.event_id:a.event_id);
+    if(!ev || ev.event_type!==statsType) return;
+    const v=(byRound[a.round]=byRound[a.round]||{applied:0,won:0,cap:0,uApplied:0,uWon:0});
+    v.applied+=a.applied||0; v.won+=a.won||0;
+    if(statCap!=null && (a.won||0)>=statCap) v.cap++;
+    else { v.uApplied+=a.applied||0; v.uWon+=a.won||0; }
   });
   const rr=Object.entries(byRound).filter(([k,v])=>v.applied>0).sort((a,b)=>a[0]-b[0]);
   if(!rr.length){ html+=`<div class="dim" style="font-size:13px">データなし</div>`; }
   else rr.forEach(([round,v])=>{
-    const pct=Math.round(v.won/v.applied*100);
+    const bound=v.uApplied===0 && v.cap>0;
+    const pct=Math.round((v.uApplied? v.uWon/v.uApplied : v.won/v.applied)*100);
     html+=`<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line)">
       <span style="font-weight:600;width:52px">${round}次</span>
-      <span class="dim grow" style="font-size:12px">当選${v.won}/申請${v.applied}</span>
-      <span style="font-weight:700">${pct}%</span></div>`;
+      <span class="dim grow" style="font-size:12px">当選${v.won}/申請${v.applied}${v.cap?` ・ <span style="color:var(--warn)">打ち止め${v.cap}件</span>`:""}</span>
+      <span style="font-weight:700">${bound?"≥":""}${pct}%</span></div>`;
   });
   html+=`</div>`;
   el.innerHTML=html;
@@ -1774,7 +1861,12 @@ function renderSim(){
       ${miniStat("期待当選","<span id='simExp'>0.0</span>枚")}
       ${miniStat("期待当選率","<span id='simRate'>—</span>")}
     </div>
-    <p class="dim" style="font-size:11px;margin:10px 0 0">当選率は選択メンバー・選択種別・選択回次の歴代実績(その部の実データ)のみで算出します。データの無い部は「データなし」と表示し、合計・期待当選の計算からは除外します。確率の目安です。</p>
+    <div class="row" id="simWasteBox" style="display:none;margin-top:12px;padding:10px 12px;background:var(--dangerbg);border-radius:10px">
+      <span style="font-size:12px;color:var(--danger)">上限を超えて入れた分</span>
+      <span class="grow"></span>
+      <span id="simWaste" style="font-weight:700;color:var(--danger)">—</span>
+    </div>
+    <p class="dim" style="font-size:11px;margin:10px 0 0" id="simNote">当選率は選択メンバー・選択種別・選択回次の歴代実績(その部の実データ)のみで算出します。データの無い部は「データなし」と表示し、合計・期待当選の計算からは除外します。確率の目安です。</p>
   </div>`;
   el.innerHTML=html;
   simBuild();
@@ -1783,6 +1875,8 @@ function simBuild(){
   const type=($("#simType")||{}).value||simType;
   const box=$("#simRows"); if(!box) return;
   if(!type){ box.innerHTML=`<div class="empty" style="padding:20px">このメンバーの所属グループにイベントがありません。</div>`; simCalc(); return; }
+  // 種別ごとの制度(当選上限・単価・支払いの向き)
+  const rule=typeRule(type), cap=rule.winCap;
 
   // 選択メンバー × 選択種別 × 選択回次 の「部」別当選率を集計(種別で完全に分離)
   // 各部の代表時刻も保持(カスタムは実データの時刻を使うため)。
@@ -1792,9 +1886,12 @@ function simBuild(){
       const ev=byId(DB.events,s.event_id); if(!ev) return;
       if(ev.event_type!==type) return;                 // ★種別フィルタ(他種別を混ぜない)
       DB.applications.filter(a=>a.session_id===s.id && a.member_id===simMemberId && a.round===simRound && !isComp(a)).forEach(a=>{
-        (byBu[s.bu_no]=byBu[s.bu_no]||{applied:0,won:0,times:{}});
-        byBu[s.bu_no].applied+=a.applied||0; byBu[s.bu_no].won+=a.won||0;
-        const t=s.start_time.slice(0,5); byBu[s.bu_no].times[t]=(byBu[s.bu_no].times[t]||0)+1;
+        const v=(byBu[s.bu_no]=byBu[s.bu_no]||{applied:0,won:0,cap:0,uApplied:0,uWon:0,times:{}});
+        v.applied+=a.applied||0; v.won+=a.won||0;
+        // 当選率タブと同じ補正: 上限に届いた回は率の計算から外す
+        if(cap!=null && (a.won||0)>=cap) v.cap++;
+        else { v.uApplied+=a.applied||0; v.uWon+=a.won||0; }
+        const t=s.start_time.slice(0,5); v.times[t]=(v.times[t]||0)+1;
       });
     });
   }
@@ -1819,41 +1916,70 @@ function simBuild(){
     rowsSpec=buildSchedule(TEMPLATES[type]||TEMPLATES.kojin_online).map(s=>({bu_no:s.bu_no, k:s.start_time.slice(0,5)}));
   }
 
+  box.dataset.payment=rule.payment||"post";
+  box.dataset.unit=rule.unitPrice||0;
+  const wb=$("#simWasteBox"); if(wb) wb.style.display=(cap!=null&&rule.payment==="pre")?"":"none";
+  const note=$("#simNote");
+  if(note) note.textContent = cap!=null
+    ? `この種別は1部あたり当選 ${cap}枚 が上限です。上限に届くのに要る枚数を「目安」として出し、それを超えた分は当選に繋がりません`
+      + (rule.payment==="pre"?"(先払いなので、そのまま無駄になります)。":"。")
+      + " 当選率は選択メンバー・種別・回次の実績のみで算出します。"
+    : "当選率は選択メンバー・選択種別・選択回次の歴代実績(その部の実データ)のみで算出します。データの無い部は「データなし」と表示し、合計・期待当選の計算からは除外します。確率の目安です。";
+
   box.innerHTML=rowsSpec.map((s)=>{
     const k=s.k;
     const v=byBu[s.bu_no];
     const hasData = !!(v && v.applied);
-    const rate = hasData ? v.won/v.applied : null;
+    const rate = !hasData ? null : (v.uApplied ? v.uWon/v.uApplied : v.won/v.applied);
     if(!hasData){
-      return `<div class="row" style="padding:9px 0;border-bottom:1px solid var(--line);gap:10px;opacity:.65" data-nodata="1">
-        <div style="width:70px"><div style="font-weight:600">${s.bu_no}部</div><div class="dim" style="font-size:11px">${k}</div></div>
-        <input type="number" min="0" value="3" style="width:62px;text-align:center;padding:6px" disabled class="simInput">
-        <span style="font-size:12px;color:var(--txt3);width:104px">データなし</span>
-        <span class="grow" style="text-align:right;font-weight:700;color:var(--txt3)">期待 —</span>
-      </div>`;
+      return `<div class="simrow" style="border-bottom:1px solid var(--line);opacity:.65" data-nodata="1">
+        <div class="row" style="padding:9px 0;gap:10px">
+          <div style="width:70px"><div style="font-weight:600">${s.bu_no}部</div><div class="dim" style="font-size:11px">${k}</div></div>
+          <input type="number" min="0" value="3" style="width:62px;text-align:center;padding:6px" disabled class="simInput">
+          <span style="font-size:12px;color:var(--txt3);width:104px">データなし</span>
+          <span class="grow" style="text-align:right;font-weight:700;color:var(--txt3)">期待 —</span>
+        </div></div>`;
     }
     const col=rate>=.5?'var(--ok)':rate>=.3?'var(--warn)':'var(--danger)';
-    return `<div class="row" style="padding:9px 0;border-bottom:1px solid var(--line);gap:10px" data-rate="${rate}">
-      <div style="width:70px"><div style="font-weight:600">${s.bu_no}部</div><div class="dim" style="font-size:11px">${k}</div></div>
-      <input type="number" min="0" value="3" style="width:62px;text-align:center;padding:6px" oninput="simCalc()" class="simInput">
-      <span style="font-size:12px;color:${col};width:104px">当選率 ${Math.round(rate*100)}%</span>
-      <span class="grow" style="text-align:right;font-weight:700">期待 <span class="expCell">0.0</span></span>
+    const need=needForCap(rate,cap);
+    return `<div class="simrow" style="border-bottom:1px solid var(--line)"
+                 data-rate="${rate}" data-cap="${cap??""}" data-need="${need??""}">
+      <div class="row" style="padding:9px 0 ${need!=null?"2px":"9px"};gap:10px">
+        <div style="width:70px"><div style="font-weight:600">${s.bu_no}部</div><div class="dim" style="font-size:11px">${k}</div></div>
+        <input type="number" min="0" value="3" style="width:62px;text-align:center;padding:6px" oninput="simCalc()" class="simInput">
+        <span style="font-size:12px;color:${col};width:104px">当選率 ${Math.round(rate*100)}%</span>
+        <span class="grow" style="text-align:right;font-weight:700">期待 <span class="expCell">0.0</span></span>
+      </div>
+      ${need!=null?`<div class="hint dim" style="font-size:11px;padding:0 0 8px 80px"></div>`:""}
     </div>`;
   }).join("");
   simCalc();
 }
 function simCalc(){
-  const rows=document.querySelectorAll("#simRows .row");
-  let totA=0,totE=0;
-  rows.forEach(r=>{
+  const box=$("#simRows"); if(!box) return;
+  const pay=box.dataset.payment, unit=+box.dataset.unit||0;
+  let totA=0,totE=0,totOver=0;
+  box.querySelectorAll(".simrow").forEach(r=>{
     if(r.dataset.nodata) return;                  // データなしの部は合計に含めない
-    const rate=+r.dataset.rate; const v=+r.querySelector(".simInput").value||0;
-    const e=v*rate; totA+=v; totE+=e;
+    const rate=+r.dataset.rate;
+    const cap =r.dataset.cap ==="" ? null : +r.dataset.cap;
+    const need=r.dataset.need==="" ? null : +r.dataset.need;
+    const v=+r.querySelector(".simInput").value||0;
+    let e=v*rate;
+    if(cap!=null) e=Math.min(e,cap);              // 制度上ありえない期待値を出さない
+    totA+=v; totE+=e;
     r.querySelector(".expCell").textContent=e.toFixed(1);
+    const over=(need!=null && v>need) ? v-need : 0;
+    totOver+=over;
+    const hint=r.querySelector(".hint");
+    if(hint&&need!=null) hint.innerHTML=`上限 ${cap}枚 ・ 目安 ${need}枚で到達`
+      + (over?` ・ <span style="color:var(--danger);font-weight:600">過剰 ${over}枚</span>`:"");
   });
   $("#simApp").textContent=totA;
   $("#simExp").textContent=totE.toFixed(1);
   $("#simRate").textContent=totA?Math.round(totE/totA*100)+"%":"—";
+  const w=$("#simWaste");
+  if(w) w.textContent = totOver ? (pay==="pre"&&unit ? `${totOver}枚 ・ ${yen(totOver*unit)}` : `${totOver}枚`) : "なし";
 }
 
 /* =========================================================================
@@ -1897,6 +2023,7 @@ function dataEditorBody(){
     return `<div class="empty">グループがありません。「記録」からリリースを追加すると作成されます。</div>`;
   }
   let h=`<p class="dim" style="font-size:11px;margin:0 0 12px">グループ名・メンバー名の修正、オシ(★)指定、不要なデータの削除ができます。削除は元に戻せません。</p>`;
+  h+=typeRulesEditorHtml();
   groups.forEach(g=>{
     const mem=membersOfGroup(g.id);
     const relCount=DB.releases.filter(r=>r.group_id===g.id).length;
