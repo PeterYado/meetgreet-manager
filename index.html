@@ -209,7 +209,7 @@ const RECEIPT_CUT    = 15;   // 受付締切: 終了の何分前
 const TEMPLATES = {
   kojin_online: {
     label:"個別オンラインミーグリ (5部)", group:"乃木坂46",
-    bu:5, dur:90, firstStart:"10:00", restAfter:[30,60,30,30], venue:"俺ん家", online:true
+    bu:5, dur:90, firstStart:"10:00", restAfter:[30,60,30,30], venue:"自宅", online:true
   },
   kojin_akushu: {
     label:"個別握手会 (5部・従来)", group:"乃木坂46",
@@ -217,7 +217,7 @@ const TEMPLATES = {
   },
   zenkoku_online: {
     label:"全国オンラインミーグリ (4部)", group:"乃木坂46",
-    bu:4, dur:60, firstStart:"12:00", restAfter:[30,30,30], venue:"俺ん家", online:true
+    bu:4, dur:60, firstStart:"12:00", restAfter:[30,30,30], venue:"自宅", online:true
   },
   real_meetgreet: {
     label:"リアルミーグリ (4部)", group:"乃木坂46",
@@ -804,7 +804,7 @@ function newEventPrompt(rid){
     <p class="dim" style="font-size:11px;margin:-4px 0 10px">カスタムな進行(他グループの握手会など)は「データ編集」でカスタム種別を登録すると、ここに出ます。</p>
     <div class="grid2">
       <div class="field"><label class="fld">開催日</label>${dateField("m_edate","","開催日を選択")}</div>
-      <div class="field"><label class="fld">会場(俺ん家=オンライン)</label><input type="text" id="m_venue" value="俺ん家"></div>
+      <div class="field"><label class="fld">会場(自宅=オンライン)</label><input type="text" id="m_venue" value="自宅"></div>
     </div>
     <div class="field"><label class="fld">部スケジュール プレビュー(後で個別編集・追加可)</label>
       <div id="m_sched" style="background:var(--bg2);border:1px solid var(--line2);border-radius:10px;padding:10px;font-size:13px"></div></div>
@@ -838,7 +838,7 @@ function previewSched(){
   const type=$("#m_type").value;
   const box=$("#m_sched"); if(!box) return;
   const v=$("#m_venue"); const tplOnline=TEMPLATES[type]?.online;
-  if(v && tplOnline && v.value==="") v.value="俺ん家";
+  if(v && tplOnline && v.value==="") v.value="自宅";
   box.innerHTML=currentPreviewSessions(type).map(s=>
     `<div class="row" style="padding:3px 0"><span style="width:40px;font-weight:600">${s.bu_no}部</span>
      <span class="grow">${s.start_time.slice(0,5)}–${s.end_time.slice(0,5)}</span>
