@@ -1157,7 +1157,7 @@ function typeRule(type){
 function needForCap(rate,cap){
   return (cap!=null && rate>0) ? Math.ceil(cap/rate) : null;
 }
-const yen=n=>"¥"+Math.round(n).toLocaleString("ja-JP");
+const yen=n=>(n<0?"-¥":"¥")+Math.abs(Math.round(n)).toLocaleString("ja-JP");
 
 /* ---------- 種別の設定エディタ(データ編集の先頭に1回だけ) ---------- */
 function typeRulesEditorHtml(){
@@ -1658,10 +1658,12 @@ function renderGrid(){
   h+=`<div class="segbar">
     <button class="${gridMode==="hold"?"on":""}" onclick="gridMode='hold';renderGrid()">保有</button>
     <button class="${gridMode==="score"?"on":""}" onclick="gridMode='score';renderGrid()">成績</button>
+    <button class="${gridMode==="cost"?"on":""}" onclick="gridMode='cost';renderGrid()">費用</button>
   </div>`;
 
-  h += (gridMode==="score") ? gridScoreHtml(gridReleaseId,gridMemberId)
-                            : gridHoldHtml(gridReleaseId,gridMemberId);
+  h += gridMode==="score" ? gridScoreHtml(gridReleaseId,gridMemberId)
+     : gridMode==="cost"  ? gridCostHtml(gridReleaseId)
+     :                      gridHoldHtml(gridReleaseId,gridMemberId);
   el.innerHTML=h;
 }
 
@@ -1763,6 +1765,114 @@ function gridCell(eid,bu){
     <button class="btn ghost" style="width:100%;margin-top:16px" onclick="closeModals();openEvent('${e.id}')">「記録」で編集する</button>
   `, async()=>true);
   ["mOk","mCancel"].forEach(id=>{ const b=document.getElementById(id); if(b) b.style.display="none"; });
+}
+
+/* --- 費用モード ---
+   支払いの向きが逆の2種類を並べる。
+     全握券 … 先に CD を買い、同梱シリアルで応募する(落選しても戻らない)
+     個握券 … 当選した枚数だけ後から CD を買う
+   スプレッドシートのシングル別サマリ右ブロックに相当する。
+   家計簿そのものは別アプリで管理しているので、ここは権数と費用、
+   直前シングルとの比較までに留める。 */
+function prevRelease(rid){
+  const r=byId(DB.releases,rid); if(!r) return null;
+  // 「直前」は発売日ではなく開催の始まりで見る(発売前に握手会が始まることがある)
+  const key=x=>{ const e=eventsOf(x.id); return e.length?e[0].event_date:(x.release_date||""); };
+  const k=key(r); if(!k) return null;
+  const cands=DB.releases.filter(x=>x.group_id===r.group_id && x.id!==r.id && key(x) && key(x)<k);
+  return cands.length ? cands.sort((a,b)=>key(a)<key(b)?1:-1)[0] : null;
+}
+function releaseCost(rid){
+  const r=byId(DB.releases,rid); if(!r) return null;
+  const zenQty  = r.zen_qty||0;
+  const zenUnit = r.zen_unit_price ?? (typeRule("zenkoku_online").unitPrice||0);
+  const zenShip = r.zen_shipping||0;
+  const zenSum  = zenQty ? zenQty*zenUnit+zenShip : 0;
+  // 個握券は「当選した枚数だけ買う」。無敵券は買っていないので除く。
+  let kojQty=0;
+  eventsOf(rid).forEach(e=>{
+    if(typeRule(e.event_type).payment!=="post") return;
+    sessionsOf(e.id).forEach(s=>appsOf(s.id).forEach(a=>{ if(!isComp(a)) kojQty+=a.won||0; }));
+  });
+  const kojUnit = r.koj_unit_price ?? (typeRule("kojin_online").unitPrice||0);
+  const kojSum  = kojQty*kojUnit;
+  return {zenQty,zenUnit,zenShip,zenSum,kojQty,kojUnit,kojSum,
+          qty:zenQty+kojQty, sum:zenSum+kojSum};
+}
+async function updRelease(rid,field,v){
+  const r=byId(DB.releases,rid); if(!r) return;
+  const n = String(v).trim()==="" ? null : (+v||0);
+  r[field]=n;
+  await dbUpdate("releases",rid,{[field]:n});
+  renderGrid();
+}
+function gridCostHtml(rid){
+  const c=releaseCost(rid); if(!c) return "";
+  // ラベルを上に置いた数値欄。横に並べると送料が折り返してしまうため。
+  const num=(id,field,val,ph,label)=>`<div class="field" style="margin:0">
+    <label class="fld" style="margin-bottom:4px">${label}</label>
+    <input type="number" min="0" id="${id}" value="${val??""}" placeholder="${ph||""}"
+      style="text-align:right;padding:7px 9px;font-size:13px" onchange="updRelease('${rid}','${field}',this.value)"></div>`;
+  const r=byId(DB.releases,rid);
+  const line=(k,v,strong)=>`<div class="row" style="padding:6px 0">
+      <span class="${strong?"":"dim"}" style="font-size:${strong?"13px":"12px"};${strong?"font-weight:600":""}">${k}</span>
+      <span class="grow"></span>
+      <span style="font-weight:${strong?"700":"600"};${strong?"color:var(--acc)":""}">${v}</span></div>`;
+
+  let h=`<div class="card">
+    <div class="row" style="margin-bottom:10px">
+      <span class="pill t-zenkoku_online">全握券</span>
+      <span class="dim" style="font-size:11px;margin-left:8px">先払い ・ 落選分は戻らない</span>
+    </div>
+    <div class="grid3">
+      ${num("c_zq","zen_qty",r.zen_qty,"58","枚数")}
+      ${num("c_zu","zen_unit_price",r.zen_unit_price,String(c.zenUnit),"単価")}
+      ${num("c_zs","zen_shipping",r.zen_shipping,"0","送料")}
+    </div>
+    ${c.zenQty?line("小計",`${c.zenQty}枚 ・ ${yen(c.zenSum)}`,true)
+              :`<p class="dim" style="font-size:11px;margin:8px 0 0">枚数を入れると小計が出ます。</p>`}
+  </div>`;
+
+  h+=`<div class="card">
+    <div class="row" style="margin-bottom:10px">
+      <span class="pill t-kojin_online">個握券</span>
+      <span class="dim" style="font-size:11px;margin-left:8px">後払い ・ 当選した分だけ買う</span>
+    </div>
+    <div class="grid2">
+      <div class="field" style="margin:0"><label class="fld" style="margin-bottom:4px">当選(自動)</label>
+        <div style="padding:7px 9px;font-size:13px;font-weight:700;text-align:right;
+                    background:var(--bg2);border:1px solid var(--line);border-radius:var(--r2)">${c.kojQty}枚</div></div>
+      ${num("c_ku","koj_unit_price",r.koj_unit_price,String(c.kojUnit),"単価")}
+    </div>
+    ${line("小計",`${c.kojQty}枚 ・ ${yen(c.kojSum)}`,true)}
+    <p class="dim" style="font-size:11px;margin:8px 0 0">当選枚数は記録から自動集計します(無敵券は買っていないので除外)。</p>
+  </div>`;
+
+  h+=`<div class="card">
+    ${line("合計 枚数",`${c.qty}枚`,true)}
+    ${line("合計 費用",yen(c.sum),true)}`;
+
+  const pr=prevRelease(rid), pc=pr?releaseCost(pr.id):null;
+  if(pc && (pc.qty||pc.sum)){
+    const pct=(a,b)=>b?`${(Math.round(a/b*1000)/10).toFixed(1)}%`:"—";
+    const diff=c.sum-pc.sum;
+    h+=`<hr class="sep">
+      <div class="dim" style="font-size:11px;margin-bottom:6px">直前シングル比 ・ ${esc(pr.label)}</div>
+      <div class="row" style="padding:5px 0">
+        <span class="dim" style="font-size:12px">枚数</span><span class="grow"></span>
+        <span class="dim" style="font-size:12px;margin-right:8px">${c.qty} / ${pc.qty}</span>
+        <span style="font-weight:700">${pct(c.qty,pc.qty)}</span></div>
+      <div class="row" style="padding:5px 0">
+        <span class="dim" style="font-size:12px">費用</span><span class="grow"></span>
+        <span class="dim" style="font-size:12px;margin-right:8px">${yen(c.sum)} / ${yen(pc.sum)}</span>
+        <span style="font-weight:700">${pct(c.sum,pc.sum)}</span></div>
+      <div class="row" style="padding:5px 0">
+        <span class="dim" style="font-size:12px">差額</span><span class="grow"></span>
+        <span style="font-weight:700;color:${diff>0?"var(--danger)":"var(--ok)"}">${diff>0?"+":""}${yen(diff)}</span></div>`;
+  }
+  h+=`</div>`;
+  h+=`<p class="dim" style="font-size:11px;margin:0 0 14px">単価を空欄にすると種別の設定(データ編集)の値を使います。日々の出費そのものは別で管理している前提で、ここはこのリリースに掛かった権数と費用だけを見ます。</p>`;
+  return h;
 }
 
 /* --- 成績モード ---
