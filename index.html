@@ -689,7 +689,8 @@ function renderEvents(){
     <button class="btn primary sm" style="margin-left:auto" onclick="newReleasePrompt()">＋ リリース</button>
   </div>`;
 
-  const rels=releaseOrder().map(x=>x.r);
+  const ord=releaseOrder();
+  const rels=ord.map(x=>x.r);
 
   if(!rels.length){
     html+=`<div class="card"><div class="empty"><span class="big">\u{1F4BF}</span>
@@ -702,8 +703,16 @@ function renderEvents(){
       <div class="row">
         <div class="grow">
           <h3 style="text-transform:none;color:var(--txt);font-size:16px;margin-bottom:2px">${esc(r.label)}</h3>
-          <div class="dim" style="font-size:12px">${esc(byId(DB.groups,r.group_id)?.name||"")} ${r.release_date?"・ "+r.release_date:""} ・ 当選計 ${totalWon}枚</div>
+          <div class="dim" style="font-size:12px">${(()=>{
+            const o=ord.find(x=>x.r.id===r.id)||{};
+            const g=esc(byId(DB.groups,r.group_id)?.name||"");
+            if(!evs.length) return `${g}${r.release_date?" ・ 発売 "+mdw(r.release_date).md:""} ・ 開催なし`;
+            const span=`${mdw(evs[0].event_date).md}〜${mdw(evs[evs.length-1].event_date).md}`;
+            return `${g} ・ 開催 ${span} ・ 当選 ${totalWon}枚`;
+          })()}</div>
         </div>
+        ${(()=>{const o=ord.find(x=>x.r.id===r.id)||{};
+          return o.next?`<span class="pill gold" style="margin-right:6px">次 ${mdw(o.next).md}</span>`:"";})()}
         <button class="btn sm ghost" onclick="newEventPrompt('${r.id}')">＋ 開催日</button>
       </div>`;
     if(evs.length){
