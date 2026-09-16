@@ -689,8 +689,7 @@ function renderEvents(){
     <button class="btn primary sm" style="margin-left:auto" onclick="newReleasePrompt()">＋ リリース</button>
   </div>`;
 
-  const groups=DB.groups.sort((a,b)=>a.sort_order-b.sort_order);
-  const rels=DB.releases.sort((a,b)=>(b.release_date||"")>(a.release_date||"")?1:-1);
+  const rels=releaseOrder().map(x=>x.r);
 
   if(!rels.length){
     html+=`<div class="card"><div class="empty"><span class="big">\u{1F4BF}</span>
@@ -1455,6 +1454,26 @@ function mdw(ymd){
 }
 function closeModals(){ document.querySelectorAll(".modalwrap").forEach(w=>w.remove()); }
 
+/* リリースの並び順。
+   発売日順にすると、新曲が出ていないグループ(AKB等)のリリースが
+   いつまでも先頭に居座ってしまう。実際に見たいのは「次の開催が近いもの」
+   なので、これからの開催がある順 → 終わったものは新しい順、にする。 */
+function releaseOrder(){
+  const t=new Date();
+  const ymd=`${t.getFullYear()}-${pad(t.getMonth()+1)}-${pad(t.getDate())}`;
+  return DB.releases.map(r=>{
+    const evs=eventsOf(r.id);
+    const next=evs.find(e=>e.event_date>=ymd);
+    return {r, next:next?next.event_date:null, last:evs.length?evs[evs.length-1].event_date:""};
+  }).sort((a,b)=>{
+    if(a.next&&b.next) return a.next<b.next?-1:1;              // 開催が近い順
+    if(a.next!==null) return -1;
+    if(b.next!==null) return 1;
+    if(a.last!==b.last) return a.last>b.last?-1:1;             // 終わったものは新しい順
+    return (b.r.release_date||"")>(a.r.release_date||"")?1:-1;
+  });
+}
+
 // そのリリースに応募記録があるメンバーID一覧
 function membersInRelease(rid){
   const set=new Set();
@@ -1464,8 +1483,8 @@ function membersInRelease(rid){
 
 /* リリース × メンバー のグリッド用データ。
    cell["<event_id>:<bu_no>"] = {won, applied, rounds:[...], sess, ev} */
-function gridData(rid, mid){
-  const evs=eventsOf(rid);
+function gridData(rid, mid, type){
+  const evs=eventsOf(rid).filter(e=>!type||e.event_type===type);
   const buSet=new Set(), times={}, cell={};
   evs.forEach(e=>{
     sessionsOf(e.id).forEach(s=>{
@@ -1495,7 +1514,7 @@ function gridData(rid, mid){
 
 function renderGrid(){
   const el=$("#tab-grid");
-  const rels=DB.releases.slice().sort((a,b)=>(b.release_date||"")>(a.release_date||"")?1:-1);
+  const ord=releaseOrder(), rels=ord.map(x=>x.r);
   if(!rels.length){
     el.innerHTML=`<h2 style="font-size:19px;margin:6px 0 12px">一覧</h2>
       <div class="card"><div class="empty"><span class="big">\u{1F4BF}</span>
@@ -1521,8 +1540,15 @@ function renderGrid(){
   const memSel=`<select onchange="gridMemberId=this.value;renderGrid()">
       ${mems.map(id=>`<option value="${id}" ${id===gridMemberId?"selected":""}>${esc(memberName(id))}${byId(DB.members,id)?.is_oshi?" ★":""}</option>`).join("")}
     </select>`;
-  h+= mems.length>1 ? `<div class="grid2" style="margin-bottom:12px">${relSel}${memSel}</div>`
-                    : `<div style="margin-bottom:12px">${relSel}</div>`;
+  h+= mems.length>1 ? `<div class="grid2">${relSel}${memSel}</div>`
+                    : `<div>${relSel}</div>`;
+  // 選択中のリリースの状況(グループ名と次の開催)を1行で
+  const oi=ord.find(x=>x.r.id===gridReleaseId);
+  const gname=(byId(DB.groups,rel.group_id)||{}).name||"";
+  const nx=oi&&oi.next;
+  h+=`<div class="dim" style="font-size:11px;margin:6px 2px 12px">${esc(gname)}${nx
+      ?` ・ 次の開催 ${mdw(nx).md}(${mdw(nx).wd}) まで あと ${daysLeft(nx)}日`
+      :(oi&&oi.last?` ・ 開催は ${mdw(oi.last).md}(${mdw(oi.last).wd}) で終了`:"")}</div>`;
 
   h+=`<div class="segbar">
     <button class="${gridMode==="hold"?"on":""}" onclick="gridMode='hold';renderGrid()">保有</button>
@@ -1534,52 +1560,75 @@ function renderGrid(){
   el.innerHTML=h;
 }
 
-/* --- 保有モード: 行=部 / 列=開催日 のマトリクス --- */
+/* --- 保有モード ---
+   種別ごとに表を分ける。個別は 5部制・10:00開始・90分進行(2部と3部の間だけ
+   1時間休憩)、全国/リアルは 4部制・12:00開始・60分進行。部数も時刻も違うので
+   同じ表に混ぜると「1部 10:00」のような嘘の行ができてしまう。 */
 function gridHoldHtml(rid, mid){
-  const {evs,bus,cell,repTime}=gridData(rid,mid);
-  if(!evs.length) return `<div class="card"><div class="empty">このリリースにはまだ開催日がありません。</div></div>`;
-  if(!bus.length)  return `<div class="card"><div class="empty">部が登録されていません。</div></div>`;
+  const all=eventsOf(rid);
+  if(!all.length) return `<div class="card"><div class="empty">このリリースにはまだ開催日がありません。</div></div>`;
+  const types=sortTypes([...new Set(all.map(e=>e.event_type))]);
+  let h="", grand=0, grandComp=0;
 
-  const colTot={}, rowTot={}; let grand=0, grandComp=0;
-  bus.forEach(bu=>rowTot[bu]=0);
-  evs.forEach(e=>colTot[e.id]=0);
-  bus.forEach(bu=>evs.forEach(e=>{
-    const c=cell[e.id+":"+bu]; if(!c) return;
-    rowTot[bu]+=c.won; colTot[e.id]+=c.won; grand+=c.won; grandComp+=c.comp;
-  }));
+  types.forEach(tp=>{
+    const {evs,bus,cell,repTime}=gridData(rid,mid,tp);
+    if(!evs.length||!bus.length) return;
+    const colTot={}, rowTot={}; let tot=0, totComp=0;
+    bus.forEach(bu=>rowTot[bu]=0);
+    evs.forEach(e=>colTot[e.id]=0);
+    bus.forEach(bu=>evs.forEach(e=>{
+      const c=cell[e.id+":"+bu]; if(!c) return;
+      rowTot[bu]+=c.won; colTot[e.id]+=c.won; tot+=c.won; totComp+=c.comp;
+    }));
+    grand+=tot; grandComp+=totComp;
 
-  let h=`<div class="card"><div class="gridwrap"><table class="mg">
-    <thead><tr><th class="stick"></th>`;
-  evs.forEach(e=>{
-    const {md,wd,cls}=mdw(e.event_date);
-    h+=`<th class="dt" onclick="openEvent('${e.id}')">${md}<span class="${cls}">${wd}</span></th>`;
-  });
-  h+=`<th class="tot">計</th></tr></thead><tbody>`;
-  bus.forEach(bu=>{
-    h+=`<tr><td class="stick"><span class="buchip" style="background:${buColor(bu)}"></span>${bu}部`
-      +`<span class="butime">${repTime(bu)}</span></td>`;
+    h+=`<div class="card">
+      <div class="row" style="margin-bottom:10px">
+        <span class="pill ${typePillClass(tp)}">${esc(typeLabel(tp))}</span>
+        <span class="dim" style="font-size:11px;margin-left:8px">${bus.length}部制 ・ ${evs.length}日</span>
+        <span style="margin-left:auto;font-weight:700;color:var(--acc)">${tot}枚</span>
+      </div>
+      <div class="gridwrap"><table class="mg"><thead><tr><th class="stick"></th>`;
     evs.forEach(e=>{
-      const c=cell[e.id+":"+bu];
-      h+= (c && c.won)
-        ? `<td class="cell has" onclick="gridCell('${e.id}',${bu})">${c.won}`
-          + (c.comp?`<span class="cdot" title="無敵券を含む"></span>`:"") + `</td>`
-        : `<td class="zero">・</td>`;
+      const {md,wd,cls}=mdw(e.event_date);
+      h+=`<th class="dt" onclick="openEvent('${e.id}')">${md}<span class="${cls}">${wd}</span></th>`;
     });
-    h+=`<td class="tot ${rowTot[bu]?"has":"zero"}">${rowTot[bu]||"・"}</td></tr>`;
+    h+=`<th class="tot">計</th></tr></thead><tbody>`;
+    bus.forEach(bu=>{
+      h+=`<tr><td class="stick"><span class="buchip" style="background:${buColor(bu)}"></span>${bu}部`
+        +`<span class="butime">${repTime(bu)}</span></td>`;
+      evs.forEach(e=>{
+        const c=cell[e.id+":"+bu];
+        h+= (c && c.won)
+          ? `<td class="cell has" onclick="gridCell('${e.id}',${bu})">${c.won}`
+            + (c.comp?`<span class="cdot" title="無敵券を含む"></span>`:"") + `</td>`
+          : `<td class="zero">・</td>`;
+      });
+      h+=`<td class="tot ${rowTot[bu]?"has":"zero"}">${rowTot[bu]||"・"}</td></tr>`;
+    });
+    h+=`<tr class="sum"><td class="stick">計</td>`;
+    evs.forEach(e=>h+=`<td>${colTot[e.id]||"・"}</td>`);
+    h+=`<td class="tot" style="color:var(--acc)">${tot}</td></tr></tbody></table></div>`;
+    if(totComp) h+=`<p class="dim" style="font-size:11px;margin:10px 0 0">
+      <span class="cdot" style="position:static;display:inline-block;margin-right:4px"></span>は無敵券を含むセル(${totComp}枚)。</p>`;
+    h+=`</div>`;
   });
-  h+=`<tr class="sum"><td class="stick">計</td>`;
-  evs.forEach(e=>h+=`<td>${colTot[e.id]||"・"}</td>`);
-  h+=`<td class="tot" style="color:var(--acc)">${grand}</td></tr>`;
-  h+=`</tbody></table></div>
-    <p class="dim" style="font-size:11px;margin:12px 0 0">数字は保有枚数。セルをタップで回次別の内訳、日付をタップで「記録」の詳細へ。このタブでは数値は変更されません。`
-    + (grandComp?`<br><span class="cdot" style="position:static;display:inline-block;margin-right:4px"></span>は無敵券を含むセル。総計 ${grand}枚のうち 無敵券 ${grandComp}枚。`:"")
-    + `</p></div>`;
+
+  if(types.length>1){
+    h+=`<div class="card"><div class="row">
+      <span style="font-weight:600">総計</span>
+      <span class="dim" style="font-size:11px;margin-left:8px">${types.map(t=>esc(typeLabel(t))).join(" + ")}</span>
+      <span style="margin-left:auto;font-size:19px;font-weight:700;color:var(--acc)">${grand}枚</span>
+    </div>${grandComp?`<div class="dim" style="font-size:11px;margin-top:6px">うち無敵券 ${grandComp}枚</div>`:""}</div>`;
+  }
+  h+=`<p class="dim" style="font-size:11px;margin:0 0 14px">数字は保有枚数。セルをタップで回次別の内訳、日付をタップで「記録」の詳細へ。このタブでは数値は変更されません。</p>`;
   return h;
 }
 
 /* --- セル詳細(回次別の内訳)。閲覧のみ --- */
 function gridCell(eid,bu){
-  const {cell}=gridData(gridReleaseId,gridMemberId);
+  const ev0=byId(DB.events,eid); if(!ev0) return;
+  const {cell}=gridData(gridReleaseId,gridMemberId,ev0.event_type);
   const c=cell[eid+":"+bu]; if(!c) return;
   const s=c.sess, e=c.ev;
   const rows=c.rounds.map(r=>`<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line)">
@@ -1594,62 +1643,69 @@ function gridCell(eid,bu){
     </div>
     <div class="dim" style="font-size:12px;margin-bottom:4px">${esc(memberName(gridMemberId))}</div>
     ${rows||`<div class="dim" style="font-size:13px">記録なし</div>`}
-    <div class="row" style="padding:10px 0 0">
+    <div class="row" style="padding:10px 0">
       <span class="grow"></span>
       <span style="font-weight:700;color:var(--acc)">合計 ${c.won}枚</span></div>
     ${s.topic?`<p class="dim" style="font-size:12px;margin:10px 0 0">\u{1F4AC} ${esc(s.topic)}</p>`:""}
     <button class="btn ghost" style="width:100%;margin-top:16px" onclick="closeModals();openEvent('${e.id}')">「記録」で編集する</button>
   `, async()=>true);
-  // 閲覧専用モーダル。保存/キャンセルは不要なので「閉じる」だけ残す。
   ["mOk","mCancel"].forEach(id=>{ const b=document.getElementById(id); if(b) b.style.display="none"; });
 }
 
-/* --- 成績モード: 回次ごとに 行=開催日 / 列=申請・当選・当選率 + 累計 --- */
+/* --- 成績モード ---
+   保有モードと同じく種別ごとに分ける。個別は申込(抽選)で、全国/リアルは
+   先に買ったシリアルで応募するため、そもそも同じ土俵の数字ではない。 */
 function gridScoreHtml(rid, mid){
-  const evs=eventsOf(rid);
-  if(!evs.length) return `<div class="card"><div class="empty">このリリースにはまだ開催日がありません。</div></div>`;
-  const roundSet=new Set(), m={};
-  evs.forEach(e=>sessionsOf(e.id).forEach(s=>{
-    DB.applications.filter(a=>a.session_id===s.id && (!mid||a.member_id===mid) && !isComp(a)).forEach(a=>{
-      roundSet.add(a.round);
-      const r=(m[a.round]=m[a.round]||{});
-      const c=(r[e.id]=r[e.id]||{applied:0,won:0});
-      c.applied+=a.applied||0; c.won+=a.won||0;
-    });
-  }));
-  const rs=[...roundSet].sort((a,b)=>a-b);
-  if(!rs.length) return `<div class="card"><div class="empty">このリリースの応募記録がありません。<br>「記録」タブで申請・当選を入力してください。</div></div>`;
-
+  const all=eventsOf(rid);
+  if(!all.length) return `<div class="card"><div class="empty">このリリースにはまだ開催日がありません。</div></div>`;
+  const types=sortTypes([...new Set(all.map(e=>e.event_type))]);
   const pct=(w,a)=>a?(Math.round(w/a*1000)/10)+"%":"—";
   const col=(w,a)=>!a?"var(--txt3)":(w/a>=.5?"var(--ok)":w/a>=.3?"var(--warn)":"var(--danger)");
-  let h="", cumA=0, cumW=0;
-  rs.forEach((r,i)=>{
-    const per=m[r]||{};
-    let sa=0,sw=0;
-    h+=`<div class="card"><h3 style="color:var(--acc);text-transform:none;font-size:14px">${r}次</h3>
-      <div class="gridwrap"><table class="mg"><thead><tr>
-        <th class="stick">開催日</th><th>申請</th><th>当選</th><th class="tot">当選率</th>
-      </tr></thead><tbody>`;
-    evs.forEach(e=>{
-      const c=per[e.id]||{applied:0,won:0};
-      sa+=c.applied; sw+=c.won;
-      const {md,wd,cls}=mdw(e.event_date);
-      h+=`<tr><td class="stick">${md}<span class="butime ${cls}">${wd}</span></td>
-        <td class="${c.applied?"":"zero"}">${c.applied||"・"}</td>
-        <td class="${c.won?"has":"zero"}">${c.won||"・"}</td>
-        <td class="tot" style="color:${col(c.won,c.applied)};font-weight:600">${pct(c.won,c.applied)}</td></tr>`;
+  let out="";
+
+  types.forEach(tp=>{
+    const evs=all.filter(e=>e.event_type===tp);
+    const roundSet=new Set(), m={};
+    evs.forEach(e=>sessionsOf(e.id).forEach(s=>{
+      DB.applications.filter(a=>a.session_id===s.id && (!mid||a.member_id===mid) && !isComp(a)).forEach(a=>{
+        roundSet.add(a.round);
+        const r=(m[a.round]=m[a.round]||{});
+        const c=(r[e.id]=r[e.id]||{applied:0,won:0});
+        c.applied+=a.applied||0; c.won+=a.won||0;
+      });
+    }));
+    const rs=[...roundSet].sort((a,b)=>a-b);
+    if(!rs.length) return;
+    out+=`<div class="row" style="margin:2px 0 8px">
+      <span class="pill ${typePillClass(tp)}">${esc(typeLabel(tp))}</span></div>`;
+    let cumA=0, cumW=0;
+    rs.forEach((r,i)=>{
+      const per=m[r]||{}; let sa=0,sw=0;
+      out+=`<div class="card"><h3 style="color:var(--acc);text-transform:none;font-size:14px">${r}次</h3>
+        <div class="gridwrap"><table class="mg"><thead><tr>
+          <th class="stick">開催日</th><th>申請</th><th>当選</th><th class="tot">当選率</th>
+        </tr></thead><tbody>`;
+      evs.forEach(e=>{
+        const c=per[e.id]||{applied:0,won:0};
+        sa+=c.applied; sw+=c.won;
+        const {md,wd,cls}=mdw(e.event_date);
+        out+=`<tr><td class="stick">${md}<span class="butime ${cls}">${wd}</span></td>
+          <td class="${c.applied?"":"zero"}">${c.applied||"・"}</td>
+          <td class="${c.won?"has":"zero"}">${c.won||"・"}</td>
+          <td class="tot" style="color:${col(c.won,c.applied)};font-weight:600">${pct(c.won,c.applied)}</td></tr>`;
+      });
+      cumA+=sa; cumW+=sw;
+      out+=`<tr class="sum"><td class="stick">計</td><td>${sa}</td><td>${sw}</td>
+        <td class="tot" style="color:${col(sw,sa)}">${pct(sw,sa)}</td></tr>`;
+      if(i>0){
+        out+=`<tr class="sum"><td class="stick" style="font-size:11px">${rs.slice(0,i+1).map(x=>x+"次").join("+")}</td>
+          <td>${cumA}</td><td>${cumW}</td>
+          <td class="tot" style="color:${col(cumW,cumA)}">${pct(cumW,cumA)}</td></tr>`;
+      }
+      out+=`</tbody></table></div></div>`;
     });
-    cumA+=sa; cumW+=sw;
-    h+=`<tr class="sum"><td class="stick">計</td><td>${sa}</td><td>${sw}</td>
-      <td class="tot" style="color:${col(sw,sa)}">${pct(sw,sa)}</td></tr>`;
-    if(i>0){
-      h+=`<tr class="sum"><td class="stick" style="font-size:11px">${rs.slice(0,i+1).map(x=>x+"次").join("+")}</td>
-        <td>${cumA}</td><td>${cumW}</td>
-        <td class="tot" style="color:${col(cumW,cumA)}">${pct(cumW,cumA)}</td></tr>`;
-    }
-    h+=`</tbody></table></div></div>`;
   });
-  return h;
+  return out||`<div class="card"><div class="empty">このリリースの応募記録がありません。<br>「記録」タブで申請・当選を入力してください。</div></div>`;
 }
 
 /* =========================================================================
