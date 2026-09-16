@@ -131,6 +131,7 @@
   .datewrap input[type=date]:focus + .datedisp,
   .datewrap input[type=time]:focus + .datedisp{
     border-color:var(--acc);box-shadow:0 0 0 3px rgba(201,168,74,.15)}
+  input[type=checkbox]{width:18px;height:18px;accent-color:var(--acc);margin:0;flex:none}
   label.fld{display:block;font-size:12px;color:var(--txt2);margin:0 0 5px 2px}
   .field{margin-bottom:12px}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -163,6 +164,9 @@
   table.mg td.zero{color:var(--txt3)}
   table.mg td.has{font-weight:700}
   table.mg td.cell{cursor:pointer;position:relative}
+  table.mg td.abs{color:var(--txt3);text-decoration:line-through;text-decoration-color:var(--warn)}
+  table.mg td.abs::after{content:"欠";position:absolute;top:1px;right:2px;font-size:8px;
+    color:var(--warn);text-decoration:none;letter-spacing:0}
   .cdot{position:absolute;top:3px;right:3px;width:5px;height:5px;border-radius:50%;
     background:var(--acc);box-shadow:0 0 4px rgba(201,168,74,.8)}
   table.mg td.cell:active{background:var(--card2)}
@@ -209,7 +213,7 @@ const RECEIPT_CUT    = 15;   // 受付締切: 終了の何分前
 const TEMPLATES = {
   kojin_online: {
     label:"個別オンラインミーグリ (5部)", group:"乃木坂46",
-    bu:5, dur:90, firstStart:"10:00", restAfter:[30,60,30,30], venue:"俺ん家", online:true
+    bu:5, dur:90, firstStart:"10:00", restAfter:[30,60,30,30], venue:"自宅", online:true
   },
   kojin_akushu: {
     label:"個別握手会 (5部・従来)", group:"乃木坂46",
@@ -217,7 +221,7 @@ const TEMPLATES = {
   },
   zenkoku_online: {
     label:"全国オンラインミーグリ (4部)", group:"乃木坂46",
-    bu:4, dur:60, firstStart:"12:00", restAfter:[30,30,30], venue:"俺ん家", online:true
+    bu:4, dur:60, firstStart:"12:00", restAfter:[30,30,30], venue:"自宅", online:true
   },
   real_meetgreet: {
     label:"リアルミーグリ (4部)", group:"乃木坂46",
@@ -272,7 +276,7 @@ function typePillClass(type){
 /* ---------- グローバル状態 ---------- */
 let sb=null, USER=null;
 const DB={ groups:[],members:[],releases:[],events:[],sessions:[],applications:[],
-           comp_tickets:[],release_members:[] };
+           comp_tickets:[],release_members:[],absences:[] };
 let SETTINGS={ yearGoal:0, customTypes:[], typeRules:{} };  // customTypes: ユーザー定義の種別テンプレ / typeRules: 種別ごとの上限・単価
 let activeTab="home";
 let selectedReleaseId=null, selectedEventId=null;
@@ -299,7 +303,7 @@ const tbl=name=>TBL_PREFIX+name;
 async function loadAll(){
   setSync("saving","読込中…");
   const tables=["groups","members","releases","events","sessions","applications",
-                "comp_tickets","release_members"];
+                "comp_tickets","release_members","absences"];
   for(const t of tables){
     const {data,error}=await sb.from(tbl(t)).select("*");
     if(error){ console.error(t,error); setSync("err"); toast("読込失敗: "+t); return false; }
@@ -363,6 +367,13 @@ const compBalance = mid => compIssued(mid)-compUsed(mid);
 function membersWithComp(){
   return DB.members.filter(m=>!m.is_graduated && (compIssued(m.id)>0||compUsed(m.id)>0));
 }
+
+/* ---------- 欠席(部 × メンバー) ----------
+   メンバーが欠席しても「当選した」事実は変わらないので、当選率の分子にも
+   個握券の費用にも枚数はそのまま残す。変わるのは実際に参加できたかどうか
+   だけなので、印を付けて区別する。欠席は1日まるごととは限らないため単位は部。 */
+const absenceRow = (sid,mid) => DB.absences.find(x=>x.session_id===sid&&x.member_id===mid)||null;
+const isAbsent   = (sid,mid) => !!absenceRow(sid,mid);
 
 /* ---------- 完売(リリース × メンバー) ----------
    完売の速さはメンバーごとに違う。完売後に増える枚数は抽選由来ではないが、
@@ -599,7 +610,8 @@ function renderHome(){
   const stat=yearStats(today.getFullYear());
   html+=`<div class="card"><h3>${today.getFullYear()}年 サマリ</h3>
     <div class="grid3">
-      ${miniStat("参加(当選)枚数",stat.won+"枚")}
+      ${miniStat("当選枚数",stat.won+"枚"
+        +(stat.absent?`<div style="font-size:11px;font-weight:400;color:var(--warn);margin-top:2px">実参加 ${stat.won-stat.absent}枚</div>`:""))}
       ${miniStat("開催数",stat.events+"件")}
       ${miniStat("応募 当選率",stat.rate)}
     </div></div>`;
@@ -630,19 +642,21 @@ function daysLeft(ymd){
   return Math.round((d-t)/86400000);
 }
 function yearStats(year){
-  // won = 保有(参加)枚数なので無敵券も含む。当選率は抽選分だけで出す。
-  let won=0,events=0,applied=0,lotWon=0;
+  // won = 当選(保有)枚数。無敵券も含む。当選率は抽選分だけで出す。
+  // absent = 当選したがメンバー欠席で参加できなかった分。
+  let won=0,events=0,applied=0,lotWon=0,absent=0;
   DB.events.forEach(e=>{
     if(!e.event_date.startsWith(year+"-")) return;
     events++;
     sessionsOf(e.id).forEach(s=>{
       appsOf(s.id).forEach(ap=>{
         won+=ap.won||0;
+        if(isAbsent(s.id,ap.member_id)) absent+=ap.won||0;
         if(!isComp(ap)){ applied+=ap.applied||0; lotWon+=ap.won||0; }
       });
     });
   });
-  return {won,events,rate:applied?Math.round(lotWon/applied*100)+"%":"—"};
+  return {won,events,absent,rate:applied?Math.round(lotWon/applied*100)+"%":"—"};
 }
 function startCountdown(list){
   if(countdownTimer) clearInterval(countdownTimer);
@@ -689,8 +703,8 @@ function renderEvents(){
     <button class="btn primary sm" style="margin-left:auto" onclick="newReleasePrompt()">＋ リリース</button>
   </div>`;
 
-  const groups=DB.groups.sort((a,b)=>a.sort_order-b.sort_order);
-  const rels=DB.releases.sort((a,b)=>(b.release_date||"")>(a.release_date||"")?1:-1);
+  const ord=releaseOrder();
+  const rels=ord.map(x=>x.r);
 
   if(!rels.length){
     html+=`<div class="card"><div class="empty"><span class="big">\u{1F4BF}</span>
@@ -703,8 +717,16 @@ function renderEvents(){
       <div class="row">
         <div class="grow">
           <h3 style="text-transform:none;color:var(--txt);font-size:16px;margin-bottom:2px">${esc(r.label)}</h3>
-          <div class="dim" style="font-size:12px">${esc(byId(DB.groups,r.group_id)?.name||"")} ${r.release_date?"・ "+r.release_date:""} ・ 当選計 ${totalWon}枚</div>
+          <div class="dim" style="font-size:12px">${(()=>{
+            const o=ord.find(x=>x.r.id===r.id)||{};
+            const g=esc(byId(DB.groups,r.group_id)?.name||"");
+            if(!evs.length) return `${g}${r.release_date?" ・ 発売 "+mdw(r.release_date).md:""} ・ 開催なし`;
+            const span=`${mdw(evs[0].event_date).md}〜${mdw(evs[evs.length-1].event_date).md}`;
+            return `${g} ・ 開催 ${span} ・ 当選 ${totalWon}枚`;
+          })()}</div>
         </div>
+        ${(()=>{const o=ord.find(x=>x.r.id===r.id)||{};
+          return o.next?`<span class="pill gold" style="margin-right:6px">次 ${mdw(o.next).md}</span>`:"";})()}
         <button class="btn sm ghost" onclick="newEventPrompt('${r.id}')">＋ 開催日</button>
       </div>`;
     if(evs.length){
@@ -796,7 +818,7 @@ function newEventPrompt(rid){
     <p class="dim" style="font-size:11px;margin:-4px 0 10px">カスタムな進行(他グループの握手会など)は「データ編集」でカスタム種別を登録すると、ここに出ます。</p>
     <div class="grid2">
       <div class="field"><label class="fld">開催日</label>${dateField("m_edate","","開催日を選択")}</div>
-      <div class="field"><label class="fld">会場(俺ん家=オンライン)</label><input type="text" id="m_venue" value="俺ん家"></div>
+      <div class="field"><label class="fld">会場(自宅=オンライン)</label><input type="text" id="m_venue" value="自宅"></div>
     </div>
     <div class="field"><label class="fld">部スケジュール プレビュー(後で個別編集・追加可)</label>
       <div id="m_sched" style="background:var(--bg2);border:1px solid var(--line2);border-radius:10px;padding:10px;font-size:13px"></div></div>
@@ -830,7 +852,7 @@ function previewSched(){
   const type=$("#m_type").value;
   const box=$("#m_sched"); if(!box) return;
   const v=$("#m_venue"); const tplOnline=TEMPLATES[type]?.online;
-  if(v && tplOnline && v.value==="") v.value="俺ん家";
+  if(v && tplOnline && v.value==="") v.value="自宅";
   box.innerHTML=currentPreviewSessions(type).map(s=>
     `<div class="row" style="padding:3px 0"><span style="width:40px;font-weight:600">${s.bu_no}部</span>
      <span class="grow">${s.start_time.slice(0,5)}–${s.end_time.slice(0,5)}</span>
@@ -907,7 +929,9 @@ function renderEventDetail(el){
       <div class="row">
         <h3 style="text-transform:none;color:var(--txt);font-size:15px">${s.bu_no}部
           <span class="dim" style="font-weight:400;font-size:13px">${s.start_time.slice(0,5)}–${s.end_time.slice(0,5)}</span></h3>
-        <span class="pill close" style="margin-left:auto">締切 ${s.receipt_close.slice(0,5)}</span>
+        ${wonTotal?`<button class="btn sm ${isAbsent(s.id,detailMemberId)?"primary":"ghost"}" style="padding:3px 8px;margin-left:auto"
+            title="メンバーがこの部を欠席したか" onclick="toggleAbsent('${s.id}')">${isAbsent(s.id,detailMemberId)?"欠席":"欠席?"}</button>`:""}
+        <span class="pill close" style="margin-left:${wonTotal?"6px":"auto"}">締切 ${s.receipt_close.slice(0,5)}</span>
         ${ss.length>1?`<button class="btn sm ghost danger" style="padding:3px 8px;margin-left:6px" title="この部を削除" onclick="deleteSession('${s.id}')">部削除</button>`:""}
       </div>
       <div class="row" style="gap:6px;margin:8px 0">
@@ -1031,6 +1055,25 @@ async function addComp(sid){
   const row=await dbInsert("applications",{session_id:sid,member_id:detailMemberId,round:0,applied:0,won:0,kind:"comp"});
   DB.applications.push(row); renderEvents();
 }
+/* 欠席の切替。枚数は一切触らない(当選は当選のまま)。
+   参加できたかどうかの印だけを付け外しする。 */
+async function toggleAbsent(sid){
+  if(!detailMemberId) return;
+  const cur=absenceRow(sid,detailMemberId);
+  if(cur){
+    DB.absences=DB.absences.filter(x=>x.id!==cur.id);
+    await dbDelete("absences",cur.id);
+    toast("欠席を解除しました");
+  }else{
+    const s=byId(DB.sessions,sid);
+    const row=await dbInsert("absences",{session_id:sid,member_id:detailMemberId,
+      note:(s?s.bu_no+"部 欠席":null)});
+    DB.absences.push(row);
+    toast("欠席にしました(枚数はそのまま残ります)");
+  }
+  renderEvents();
+}
+
 // 完売の切替。オンにするとき、そのリリースでこのメンバーが応募した最大回次を記録する。
 async function toggleSoldOut(rid){
   if(!detailMemberId) return;
@@ -1367,30 +1410,90 @@ function openCompIssue(mid){
   const todayYmd=new Date().toISOString().slice(0,10);
   openModal("無敵券の発行を登録",`
     <div class="field"><label class="fld">メンバー</label>
-      <select id="ct_mem">${mems.map(m=>`<option value="${m.id}" ${m.id===sel?"selected":""}>${esc(m.name)}${m.is_oshi?" ★":""}</option>`).join("")}</select></div>
+      <select id="ct_mem" onchange="compAutofill()">${mems.map(m=>`<option value="${m.id}" ${m.id===sel?"selected":""}>${esc(m.name)}${m.is_oshi?" ★":""}</option>`).join("")}</select></div>
+    <div class="field"><label class="fld">欠席が出た開催日</label>
+      <select id="ct_src" onchange="compAutofill()"><option value="">指定しない</option>
+        ${evs.map(e=>`<option value="${e.id}">${esc(e.event_date)} ${esc(typeLabel(e.event_type))}</option>`).join("")}</select>
+      <p class="dim" style="font-size:11px;margin:5px 0 0">選ぶと、その日そのメンバーで当選していた部が下に出ます。参加できた部のチェックを外してください。</p></div>
+    <div class="field" id="ct_bu_wrap" style="display:none"><label class="fld">無敵券になった部</label>
+      <div id="ct_bu" style="background:var(--bg2);border:1px solid var(--line2);border-radius:var(--r2);padding:4px 10px"></div></div>
     <div class="grid2">
-      <div class="field"><label class="fld">枚数</label>
+      <div class="field"><label class="fld">枚数(合計)</label>
         <input type="number" id="ct_qty" min="1" value="1"></div>
       <div class="field"><label class="fld">発行日</label>${dateField("ct_date",todayYmd,"発行日を選択")}</div>
     </div>
-    <div class="field"><label class="fld">欠席が出た開催日(任意)</label>
-      <select id="ct_src"><option value="">指定しない</option>
-        ${evs.map(e=>`<option value="${e.id}">${esc(e.event_date)} ${esc(typeLabel(e.event_type))}</option>`).join("")}</select></div>
     <div class="field" style="margin-bottom:0"><label class="fld">メモ(任意)</label>
       <input type="text" id="ct_note" placeholder="体調不良で欠席 など"></div>
   `,async()=>{
     const qty=parseInt($("#ct_qty").value,10);
-    if(!(qty>0)){ toast("枚数を入力してください"); return false; }
+    if(!(qty>0)){ toast("枚数を入力してください(部のチェックが全部外れていませんか)"); return false; }
+    const mid=$("#ct_mem").value;
     const row=await dbInsert("comp_tickets",{
-      member_id:$("#ct_mem").value, qty,
+      member_id:mid, qty,
       issued_date:$("#ct_date").value||null,
       source_event_id:$("#ct_src").value||null,
       note:$("#ct_note").value.trim()||null
     });
     DB.comp_tickets.push(row);
-    toast(`無敵券 ${qty}枚 を登録しました`);
+    // チェックされた部を欠席として記録する(当選枚数はそのまま残る)
+    let nAbs=0;
+    for(const cb of document.querySelectorAll(".ctbu")){
+      if(!cb.checked) continue;
+      const sid=cb.dataset.sid;
+      if(!sid || isAbsent(sid,mid)) continue;
+      const ab=await dbInsert("absences",{session_id:sid,member_id:mid,
+        comp_ticket_id:row.id, note:cb.dataset.bu+"部 欠席"});
+      DB.absences.push(ab); nAbs++;
+    }
+    toast(`無敵券 ${qty}枚 を登録しました${nAbs?` (${nAbs}部を欠席として記録)`:""}`);
     return true;
   });
+}
+
+/* 欠席が出た開催日を選んだら、その日そのメンバーで当選していた部を並べる。
+   欠席は1日まるごととは限らない。メンバー側の負担の都合で、出られる部だけ
+   出ることがある(例: 1〜3部は欠席、4・5部は参加)。振替になるのは実際に
+   欠席した部の分だけなので、部ごとにチェックを外せるようにする。 */
+let _ctAutoNote="";
+function compAutofill(){
+  const mid=($("#ct_mem")||{}).value, eid=($("#ct_src")||{}).value;
+  const wrap=document.getElementById("ct_bu_wrap"), box=document.getElementById("ct_bu");
+  if(!wrap||!box) return;
+  if(!mid||!eid){ wrap.style.display="none"; box.innerHTML=""; _ctAutoNote=""; return; }
+  const ev=byId(DB.events,eid); if(!ev) return;
+  const rows=[];
+  sessionsOf(eid).forEach(s=>{
+    let w=0;
+    DB.applications.filter(a=>a.session_id===s.id && a.member_id===mid && !isComp(a))
+      .forEach(a=>w+=a.won||0);
+    if(w>0) rows.push({s,w});
+  });
+  const d=$("#ct_date");
+  if(d){ d.value=ev.event_date; syncDateDisp("ct_date","発行日を選択"); }
+  wrap.style.display="";
+  if(!rows.length){
+    box.innerHTML=`<p class="dim" style="font-size:12px;padding:6px 0;margin:0">この日このメンバーの当選記録がありません。枚数は手で入れてください。</p>`;
+    _ctAutoNote=""; return;
+  }
+  box.innerHTML=rows.map(r=>`<label class="row" style="gap:10px;padding:7px 0;border-bottom:1px solid var(--line);cursor:pointer">
+      <input type="checkbox" class="ctbu" data-w="${r.w}" data-bu="${r.s.bu_no}" data-sid="${r.s.id}" checked onchange="compSumBu()">
+      <span style="width:46px;font-weight:600"><span class="buchip" style="background:${buColor(r.s.bu_no)}"></span>${r.s.bu_no}部</span>
+      <span class="dim grow" style="font-size:12px">${r.s.start_time.slice(0,5)}–${r.s.end_time.slice(0,5)}</span>
+      <span style="font-weight:700">${r.w}枚</span>
+    </label>`).join("");
+  compSumBu();
+}
+// チェックされた部の枚数を合計して枚数欄とメモに反映する。
+// メモは自分で書き換えていたら上書きしない。
+function compSumBu(){
+  const cbs=[...document.querySelectorAll(".ctbu")];
+  if(!cbs.length) return;
+  const on=cbs.filter(c=>c.checked);
+  const q=$("#ct_qty"); if(q) q.value=on.reduce((n,c)=>n+(+c.dataset.w||0),0);
+  const auto=on.length?`${on.map(c=>c.dataset.bu+"部").join("・")} 欠席`:"";
+  const note=$("#ct_note");
+  if(note && (note.value===""||note.value===_ctAutoNote)) note.value=auto;
+  _ctAutoNote=auto;
 }
 
 // そのメンバーの発行履歴。使用分は応募行(kind='comp')側にあるので、ここは発行だけ。
@@ -1455,6 +1558,26 @@ function mdw(ymd){
 }
 function closeModals(){ document.querySelectorAll(".modalwrap").forEach(w=>w.remove()); }
 
+/* リリースの並び順。
+   発売日順にすると、新曲が出ていないグループ(AKB等)のリリースが
+   いつまでも先頭に居座ってしまう。実際に見たいのは「次の開催が近いもの」
+   なので、これからの開催がある順 → 終わったものは新しい順、にする。 */
+function releaseOrder(){
+  const t=new Date();
+  const ymd=`${t.getFullYear()}-${pad(t.getMonth()+1)}-${pad(t.getDate())}`;
+  return DB.releases.map(r=>{
+    const evs=eventsOf(r.id);
+    const next=evs.find(e=>e.event_date>=ymd);
+    return {r, next:next?next.event_date:null, last:evs.length?evs[evs.length-1].event_date:""};
+  }).sort((a,b)=>{
+    if(a.next&&b.next) return a.next<b.next?-1:1;              // 開催が近い順
+    if(a.next!==null) return -1;
+    if(b.next!==null) return 1;
+    if(a.last!==b.last) return a.last>b.last?-1:1;             // 終わったものは新しい順
+    return (b.r.release_date||"")>(a.r.release_date||"")?1:-1;
+  });
+}
+
 // そのリリースに応募記録があるメンバーID一覧
 function membersInRelease(rid){
   const set=new Set();
@@ -1464,8 +1587,8 @@ function membersInRelease(rid){
 
 /* リリース × メンバー のグリッド用データ。
    cell["<event_id>:<bu_no>"] = {won, applied, rounds:[...], sess, ev} */
-function gridData(rid, mid){
-  const evs=eventsOf(rid);
+function gridData(rid, mid, type){
+  const evs=eventsOf(rid).filter(e=>!type||e.event_type===type);
   const buSet=new Set(), times={}, cell={};
   evs.forEach(e=>{
     sessionsOf(e.id).forEach(s=>{
@@ -1476,7 +1599,8 @@ function gridData(rid, mid){
         .filter(a=>a.session_id===s.id && (!mid || a.member_id===mid))
         .sort((a,b)=>a.round-b.round);
       if(!apps.length) return;
-      const c=cell[e.id+":"+s.bu_no]={won:0,applied:0,comp:0,rounds:[],sess:s,ev:e};
+      const c=cell[e.id+":"+s.bu_no]={won:0,applied:0,comp:0,rounds:[],sess:s,ev:e,
+                                       absent:mid?isAbsent(s.id,mid):false};
       apps.forEach(a=>{
         c.won+=a.won||0; c.applied+=a.applied||0;
         if(isComp(a)) c.comp+=a.won||0;          // 無敵券分は内訳として別に持つ
@@ -1495,7 +1619,7 @@ function gridData(rid, mid){
 
 function renderGrid(){
   const el=$("#tab-grid");
-  const rels=DB.releases.slice().sort((a,b)=>(b.release_date||"")>(a.release_date||"")?1:-1);
+  const ord=releaseOrder(), rels=ord.map(x=>x.r);
   if(!rels.length){
     el.innerHTML=`<h2 style="font-size:19px;margin:6px 0 12px">一覧</h2>
       <div class="card"><div class="empty"><span class="big">\u{1F4BF}</span>
@@ -1521,8 +1645,15 @@ function renderGrid(){
   const memSel=`<select onchange="gridMemberId=this.value;renderGrid()">
       ${mems.map(id=>`<option value="${id}" ${id===gridMemberId?"selected":""}>${esc(memberName(id))}${byId(DB.members,id)?.is_oshi?" ★":""}</option>`).join("")}
     </select>`;
-  h+= mems.length>1 ? `<div class="grid2" style="margin-bottom:12px">${relSel}${memSel}</div>`
-                    : `<div style="margin-bottom:12px">${relSel}</div>`;
+  h+= mems.length>1 ? `<div class="grid2">${relSel}${memSel}</div>`
+                    : `<div>${relSel}</div>`;
+  // 選択中のリリースの状況(グループ名と次の開催)を1行で
+  const oi=ord.find(x=>x.r.id===gridReleaseId);
+  const gname=(byId(DB.groups,rel.group_id)||{}).name||"";
+  const nx=oi&&oi.next;
+  h+=`<div class="dim" style="font-size:11px;margin:6px 2px 12px">${esc(gname)}${nx
+      ?` ・ 次の開催 ${mdw(nx).md}(${mdw(nx).wd}) まで あと ${daysLeft(nx)}日`
+      :(oi&&oi.last?` ・ 開催は ${mdw(oi.last).md}(${mdw(oi.last).wd}) で終了`:"")}</div>`;
 
   h+=`<div class="segbar">
     <button class="${gridMode==="hold"?"on":""}" onclick="gridMode='hold';renderGrid()">保有</button>
@@ -1534,52 +1665,81 @@ function renderGrid(){
   el.innerHTML=h;
 }
 
-/* --- 保有モード: 行=部 / 列=開催日 のマトリクス --- */
+/* --- 保有モード ---
+   種別ごとに表を分ける。個別は 5部制・10:00開始・90分進行(2部と3部の間だけ
+   1時間休憩)、全国/リアルは 4部制・12:00開始・60分進行。部数も時刻も違うので
+   同じ表に混ぜると「1部 10:00」のような嘘の行ができてしまう。 */
 function gridHoldHtml(rid, mid){
-  const {evs,bus,cell,repTime}=gridData(rid,mid);
-  if(!evs.length) return `<div class="card"><div class="empty">このリリースにはまだ開催日がありません。</div></div>`;
-  if(!bus.length)  return `<div class="card"><div class="empty">部が登録されていません。</div></div>`;
+  const all=eventsOf(rid);
+  if(!all.length) return `<div class="card"><div class="empty">このリリースにはまだ開催日がありません。</div></div>`;
+  const types=sortTypes([...new Set(all.map(e=>e.event_type))]);
+  let h="", grand=0, grandComp=0, grandAbs=0;
 
-  const colTot={}, rowTot={}; let grand=0, grandComp=0;
-  bus.forEach(bu=>rowTot[bu]=0);
-  evs.forEach(e=>colTot[e.id]=0);
-  bus.forEach(bu=>evs.forEach(e=>{
-    const c=cell[e.id+":"+bu]; if(!c) return;
-    rowTot[bu]+=c.won; colTot[e.id]+=c.won; grand+=c.won; grandComp+=c.comp;
-  }));
+  types.forEach(tp=>{
+    const {evs,bus,cell,repTime}=gridData(rid,mid,tp);
+    if(!evs.length||!bus.length) return;
+    const colTot={}, rowTot={}; let tot=0, totComp=0, totAbs=0;
+    bus.forEach(bu=>rowTot[bu]=0);
+    evs.forEach(e=>colTot[e.id]=0);
+    bus.forEach(bu=>evs.forEach(e=>{
+      const c=cell[e.id+":"+bu]; if(!c) return;
+      rowTot[bu]+=c.won; colTot[e.id]+=c.won; tot+=c.won; totComp+=c.comp;
+      if(c.absent) totAbs+=c.won;                 // 当選はしたが参加できなかった分
+    }));
+    grand+=tot; grandComp+=totComp; grandAbs+=totAbs;
 
-  let h=`<div class="card"><div class="gridwrap"><table class="mg">
-    <thead><tr><th class="stick"></th>`;
-  evs.forEach(e=>{
-    const {md,wd,cls}=mdw(e.event_date);
-    h+=`<th class="dt" onclick="openEvent('${e.id}')">${md}<span class="${cls}">${wd}</span></th>`;
-  });
-  h+=`<th class="tot">計</th></tr></thead><tbody>`;
-  bus.forEach(bu=>{
-    h+=`<tr><td class="stick"><span class="buchip" style="background:${buColor(bu)}"></span>${bu}部`
-      +`<span class="butime">${repTime(bu)}</span></td>`;
+    h+=`<div class="card">
+      <div class="row" style="margin-bottom:10px">
+        <span class="pill ${typePillClass(tp)}">${esc(typeLabel(tp))}</span>
+        <span class="dim" style="font-size:11px;margin-left:8px">${bus.length}部制 ・ ${evs.length}日</span>
+        <span style="margin-left:auto;font-weight:700;color:var(--acc)">${tot}枚</span>
+        ${totAbs?`<span class="dim" style="font-size:11px;margin-left:6px;color:var(--warn)">欠席 ${totAbs}</span>`:""}
+      </div>
+      <div class="gridwrap"><table class="mg"><thead><tr><th class="stick"></th>`;
     evs.forEach(e=>{
-      const c=cell[e.id+":"+bu];
-      h+= (c && c.won)
-        ? `<td class="cell has" onclick="gridCell('${e.id}',${bu})">${c.won}`
-          + (c.comp?`<span class="cdot" title="無敵券を含む"></span>`:"") + `</td>`
-        : `<td class="zero">・</td>`;
+      const {md,wd,cls}=mdw(e.event_date);
+      h+=`<th class="dt" onclick="openEvent('${e.id}')">${md}<span class="${cls}">${wd}</span></th>`;
     });
-    h+=`<td class="tot ${rowTot[bu]?"has":"zero"}">${rowTot[bu]||"・"}</td></tr>`;
+    h+=`<th class="tot">計</th></tr></thead><tbody>`;
+    bus.forEach(bu=>{
+      h+=`<tr><td class="stick"><span class="buchip" style="background:${buColor(bu)}"></span>${bu}部`
+        +`<span class="butime">${repTime(bu)}</span></td>`;
+      evs.forEach(e=>{
+        const c=cell[e.id+":"+bu];
+        h+= (c && c.won)
+          ? `<td class="cell has${c.absent?" abs":""}" title="${c.absent?"メンバー欠席":""}" onclick="gridCell('${e.id}',${bu})">${c.won}`
+            + (c.comp?`<span class="cdot" title="無敵券を含む"></span>`:"") + `</td>`
+          : `<td class="zero">・</td>`;
+      });
+      h+=`<td class="tot ${rowTot[bu]?"has":"zero"}">${rowTot[bu]||"・"}</td></tr>`;
+    });
+    h+=`<tr class="sum"><td class="stick">計</td>`;
+    evs.forEach(e=>h+=`<td>${colTot[e.id]||"・"}</td>`);
+    h+=`<td class="tot" style="color:var(--acc)">${tot}</td></tr></tbody></table></div>`;
+    const notes=[];
+    if(totComp) notes.push(`<span class="cdot" style="position:static;display:inline-block;margin-right:4px"></span>は無敵券を含むセル(${totComp}枚)`);
+    if(totAbs)  notes.push(`<span style="color:var(--warn)">取り消し線</span>はメンバー欠席の部。当選 ${tot}枚 のうち ${totAbs}枚 は参加できず、実参加は ${tot-totAbs}枚`);
+    if(notes.length) h+=`<p class="dim" style="font-size:11px;margin:10px 0 0;line-height:1.7">${notes.join("<br>")}</p>`;
+    h+=`</div>`;
   });
-  h+=`<tr class="sum"><td class="stick">計</td>`;
-  evs.forEach(e=>h+=`<td>${colTot[e.id]||"・"}</td>`);
-  h+=`<td class="tot" style="color:var(--acc)">${grand}</td></tr>`;
-  h+=`</tbody></table></div>
-    <p class="dim" style="font-size:11px;margin:12px 0 0">数字は保有枚数。セルをタップで回次別の内訳、日付をタップで「記録」の詳細へ。このタブでは数値は変更されません。`
-    + (grandComp?`<br><span class="cdot" style="position:static;display:inline-block;margin-right:4px"></span>は無敵券を含むセル。総計 ${grand}枚のうち 無敵券 ${grandComp}枚。`:"")
-    + `</p></div>`;
+
+  if(types.length>1){
+    h+=`<div class="card"><div class="row">
+      <span style="font-weight:600">総計</span>
+      <span class="dim" style="font-size:11px;margin-left:8px">${types.map(t=>esc(typeLabel(t))).join(" + ")}</span>
+      <span style="margin-left:auto;font-size:19px;font-weight:700;color:var(--acc)">${grand}枚</span>
+    </div>${[grandComp?`うち無敵券 ${grandComp}枚`:"",
+             grandAbs?`うち欠席 ${grandAbs}枚 → 実参加 ${grand-grandAbs}枚`:""].filter(Boolean)
+        .map(t=>`<div class="dim" style="font-size:11px;margin-top:6px">${t}</div>`).join("")}</div>`;
+  }
+  h+=`<p class="dim" style="font-size:11px;margin:0 0 14px">数字は保有枚数。セルをタップで回次別の内訳、日付をタップで「記録」の詳細へ。このタブでは数値は変更されません。</p>`;
   return h;
 }
 
 /* --- セル詳細(回次別の内訳)。閲覧のみ --- */
 function gridCell(eid,bu){
-  const {cell}=gridData(gridReleaseId,gridMemberId);
+  const ev0=byId(DB.events,eid); if(!ev0) return;
+  const {cell}=gridData(gridReleaseId,gridMemberId,ev0.event_type);
   const c=cell[eid+":"+bu]; if(!c) return;
   const s=c.sess, e=c.ev;
   const rows=c.rounds.map(r=>`<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line)">
@@ -1592,64 +1752,73 @@ function gridCell(eid,bu){
       <span class="dim" style="font-size:12px">${s.start_time.slice(0,5)}–${s.end_time.slice(0,5)}</span>
       <span class="pill close" style="margin-left:auto">締切 ${(s.receipt_close||"").slice(0,5)}</span>
     </div>
+    ${c.absent?`<div class="row" style="padding:8px 10px;margin-bottom:10px;background:var(--warnbg);border-radius:8px">
+      <span style="color:var(--warn);font-size:12px">メンバー欠席のため参加できなかった部です。当選枚数はそのまま残しています。</span></div>`:""}
     <div class="dim" style="font-size:12px;margin-bottom:4px">${esc(memberName(gridMemberId))}</div>
     ${rows||`<div class="dim" style="font-size:13px">記録なし</div>`}
-    <div class="row" style="padding:10px 0 0">
+    <div class="row" style="padding:10px 0">
       <span class="grow"></span>
       <span style="font-weight:700;color:var(--acc)">合計 ${c.won}枚</span></div>
     ${s.topic?`<p class="dim" style="font-size:12px;margin:10px 0 0">\u{1F4AC} ${esc(s.topic)}</p>`:""}
     <button class="btn ghost" style="width:100%;margin-top:16px" onclick="closeModals();openEvent('${e.id}')">「記録」で編集する</button>
   `, async()=>true);
-  // 閲覧専用モーダル。保存/キャンセルは不要なので「閉じる」だけ残す。
   ["mOk","mCancel"].forEach(id=>{ const b=document.getElementById(id); if(b) b.style.display="none"; });
 }
 
-/* --- 成績モード: 回次ごとに 行=開催日 / 列=申請・当選・当選率 + 累計 --- */
+/* --- 成績モード ---
+   保有モードと同じく種別ごとに分ける。個別は申込(抽選)で、全国/リアルは
+   先に買ったシリアルで応募するため、そもそも同じ土俵の数字ではない。 */
 function gridScoreHtml(rid, mid){
-  const evs=eventsOf(rid);
-  if(!evs.length) return `<div class="card"><div class="empty">このリリースにはまだ開催日がありません。</div></div>`;
-  const roundSet=new Set(), m={};
-  evs.forEach(e=>sessionsOf(e.id).forEach(s=>{
-    DB.applications.filter(a=>a.session_id===s.id && (!mid||a.member_id===mid) && !isComp(a)).forEach(a=>{
-      roundSet.add(a.round);
-      const r=(m[a.round]=m[a.round]||{});
-      const c=(r[e.id]=r[e.id]||{applied:0,won:0});
-      c.applied+=a.applied||0; c.won+=a.won||0;
-    });
-  }));
-  const rs=[...roundSet].sort((a,b)=>a-b);
-  if(!rs.length) return `<div class="card"><div class="empty">このリリースの応募記録がありません。<br>「記録」タブで申請・当選を入力してください。</div></div>`;
-
+  const all=eventsOf(rid);
+  if(!all.length) return `<div class="card"><div class="empty">このリリースにはまだ開催日がありません。</div></div>`;
+  const types=sortTypes([...new Set(all.map(e=>e.event_type))]);
   const pct=(w,a)=>a?(Math.round(w/a*1000)/10)+"%":"—";
   const col=(w,a)=>!a?"var(--txt3)":(w/a>=.5?"var(--ok)":w/a>=.3?"var(--warn)":"var(--danger)");
-  let h="", cumA=0, cumW=0;
-  rs.forEach((r,i)=>{
-    const per=m[r]||{};
-    let sa=0,sw=0;
-    h+=`<div class="card"><h3 style="color:var(--acc);text-transform:none;font-size:14px">${r}次</h3>
-      <div class="gridwrap"><table class="mg"><thead><tr>
-        <th class="stick">開催日</th><th>申請</th><th>当選</th><th class="tot">当選率</th>
-      </tr></thead><tbody>`;
-    evs.forEach(e=>{
-      const c=per[e.id]||{applied:0,won:0};
-      sa+=c.applied; sw+=c.won;
-      const {md,wd,cls}=mdw(e.event_date);
-      h+=`<tr><td class="stick">${md}<span class="butime ${cls}">${wd}</span></td>
-        <td class="${c.applied?"":"zero"}">${c.applied||"・"}</td>
-        <td class="${c.won?"has":"zero"}">${c.won||"・"}</td>
-        <td class="tot" style="color:${col(c.won,c.applied)};font-weight:600">${pct(c.won,c.applied)}</td></tr>`;
+  let out="";
+
+  types.forEach(tp=>{
+    const evs=all.filter(e=>e.event_type===tp);
+    const roundSet=new Set(), m={};
+    evs.forEach(e=>sessionsOf(e.id).forEach(s=>{
+      DB.applications.filter(a=>a.session_id===s.id && (!mid||a.member_id===mid) && !isComp(a)).forEach(a=>{
+        roundSet.add(a.round);
+        const r=(m[a.round]=m[a.round]||{});
+        const c=(r[e.id]=r[e.id]||{applied:0,won:0});
+        c.applied+=a.applied||0; c.won+=a.won||0;
+      });
+    }));
+    const rs=[...roundSet].sort((a,b)=>a-b);
+    if(!rs.length) return;
+    out+=`<div class="row" style="margin:2px 0 8px">
+      <span class="pill ${typePillClass(tp)}">${esc(typeLabel(tp))}</span></div>`;
+    let cumA=0, cumW=0;
+    rs.forEach((r,i)=>{
+      const per=m[r]||{}; let sa=0,sw=0;
+      out+=`<div class="card"><h3 style="color:var(--acc);text-transform:none;font-size:14px">${r}次</h3>
+        <div class="gridwrap"><table class="mg"><thead><tr>
+          <th class="stick">開催日</th><th>申請</th><th>当選</th><th class="tot">当選率</th>
+        </tr></thead><tbody>`;
+      evs.forEach(e=>{
+        const c=per[e.id]||{applied:0,won:0};
+        sa+=c.applied; sw+=c.won;
+        const {md,wd,cls}=mdw(e.event_date);
+        out+=`<tr><td class="stick">${md}<span class="butime ${cls}">${wd}</span></td>
+          <td class="${c.applied?"":"zero"}">${c.applied||"・"}</td>
+          <td class="${c.won?"has":"zero"}">${c.won||"・"}</td>
+          <td class="tot" style="color:${col(c.won,c.applied)};font-weight:600">${pct(c.won,c.applied)}</td></tr>`;
+      });
+      cumA+=sa; cumW+=sw;
+      out+=`<tr class="sum"><td class="stick">計</td><td>${sa}</td><td>${sw}</td>
+        <td class="tot" style="color:${col(sw,sa)}">${pct(sw,sa)}</td></tr>`;
+      if(i>0){
+        out+=`<tr class="sum"><td class="stick" style="font-size:11px">${rs.slice(0,i+1).map(x=>x+"次").join("+")}</td>
+          <td>${cumA}</td><td>${cumW}</td>
+          <td class="tot" style="color:${col(cumW,cumA)}">${pct(cumW,cumA)}</td></tr>`;
+      }
+      out+=`</tbody></table></div></div>`;
     });
-    cumA+=sa; cumW+=sw;
-    h+=`<tr class="sum"><td class="stick">計</td><td>${sa}</td><td>${sw}</td>
-      <td class="tot" style="color:${col(sw,sa)}">${pct(sw,sa)}</td></tr>`;
-    if(i>0){
-      h+=`<tr class="sum"><td class="stick" style="font-size:11px">${rs.slice(0,i+1).map(x=>x+"次").join("+")}</td>
-        <td>${cumA}</td><td>${cumW}</td>
-        <td class="tot" style="color:${col(cumW,cumA)}">${pct(cumW,cumA)}</td></tr>`;
-    }
-    h+=`</tbody></table></div></div>`;
   });
-  return h;
+  return out||`<div class="card"><div class="empty">このリリースの応募記録がありません。<br>「記録」タブで申請・当選を入力してください。</div></div>`;
 }
 
 /* =========================================================================
