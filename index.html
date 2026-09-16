@@ -566,6 +566,9 @@ function renderHome(){
     </div>`;
   }
 
+  // --- 今週の申込サイクル(木15時開始→金14時締切→金18時発表 / 水は無敵券) ---
+  html+=weeklyCardHtml();
+
   // --- 直近の開催タイムライン ---
   html+=`<div class="card"><h3>直近の開催</h3>`;
   if(!upcoming.length){
@@ -612,6 +615,7 @@ function renderHome(){
 
   el.innerHTML=html;
   if(todaySessions.length) startCountdown(todaySessions);
+  startWeekly();
 }
 
 function miniStat(label,val){
@@ -1083,6 +1087,179 @@ async function delRelease(id){
   renderEvents();
 }
 
+
+/* =========================================================================
+   週次の申込サイクル
+   乃木坂の個別ミーグリは週単位で回る。木15:00に申込が開き、金14:00に締切、
+   金18:00以降に当落発表。翌週の木にまた開く ——「回次」はこの週の順番。
+   無敵券だけは別サイクルで、開催週の水曜に、その週の開催分に対してのみ
+   申し込める(時刻締切ではなく先着で、部が埋まると閉まる)。
+   AKBなど他グループはスケジュールが違うので mg_groups.config.cycle に持つ。
+   ========================================================================= */
+const DEFAULT_CYCLE={
+  lottery:{ open_dow:4, open_time:"15:00",     // 木 15:00 申込開始
+            close_dow:5, close_time:"14:00",   // 金 14:00 締切
+            result_dow:5, result_time:"18:00" },// 金 18:00 当落発表
+  comp:{ dow:3 }                                // 水 無敵券(その週の開催分・先着)
+};
+const DOW_LABEL=["日","月","火","水","木","金","土"];
+function cycleOf(gid){
+  const c=((byId(DB.groups,gid)||{}).config||{}).cycle||{};
+  return { lottery:Object.assign({},DEFAULT_CYCLE.lottery,c.lottery||{}),
+           comp:   Object.assign({},DEFAULT_CYCLE.comp,   c.comp||{}) };
+}
+// 指定の曜日・時刻の「次の」日時。その時刻を既に過ぎていれば来週になる。
+function nextDow(dow,hm,from){
+  const [h,m]=String(hm||"00:00").split(":").map(Number);
+  const t=new Date(from); t.setHours(h,m,0,0);
+  t.setDate(t.getDate()+((dow-from.getDay()+7)%7));
+  if(t<=from) t.setDate(t.getDate()+7);
+  return t;
+}
+// 月曜起点の週の頭
+function weekStart(d){
+  const x=new Date(d); x.setHours(0,0,0,0);
+  x.setDate(x.getDate()-((x.getDay()+6)%7)); return x;
+}
+const sameDay=(a,b)=>a.getFullYear()===b.getFullYear()&&a.getMonth()===b.getMonth()&&a.getDate()===b.getDate();
+
+/* 申込フェーズの判定。
+   「次の締切」が「次の開始」より近ければ、いまは受付中ということ。
+   同様に「次の発表」が「次の開始」より近ければ、締切後〜発表待ち。 */
+function lotteryPhase(L,now){
+  const open=nextDow(L.open_dow,L.open_time,now);
+  const close=nextDow(L.close_dow,L.close_time,now);
+  const result=nextDow(L.result_dow,L.result_time,now);
+  if(close<open)  return {key:"open",   at:close,  title:"通常申込 締切", cls:"close"};
+  if(result<open) return {key:"result", at:result, title:"当落発表",      cls:"info"};
+  return               {key:"wait",   at:open,   title:"通常申込 開始", cls:"open"};
+}
+function untilStr(ms){
+  if(ms<=0) return "まもなく";
+  const s=Math.floor(ms/1000), d=Math.floor(s/86400),
+        h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60), sec=s%60;
+  if(d>0) return `${d}日 ${h}時間`;
+  if(h>0) return `${h}時間 ${pad(m)}分`;
+  return `${m}分 ${pad(sec)}秒`;
+}
+
+/* カード描画に必要な文脈。直近の開催が無ければ null(カードごと出さない)。 */
+function weeklyCtx(){
+  const now=new Date();
+  const ymd=`${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
+  const up=DB.events.filter(e=>e.event_date>=ymd).sort((a,b)=>a.event_date>b.event_date?1:-1);
+  if(!up.length) return null;
+  const rel=byId(DB.releases,up[0].release_id);
+  const gid=rel?rel.group_id:null;
+  const cyc=cycleOf(gid);
+  // 今週(月〜日)の開催 = 無敵券の対象
+  const ws=weekStart(now), we=new Date(ws); we.setDate(ws.getDate()+7);
+  const thisWeek=up.filter(e=>{const d=new Date(e.event_date+"T00:00:00");return d>=ws&&d<we;});
+  const wed=new Date(ws); wed.setDate(ws.getDate()+((cyc.comp.dow+6)%7));
+  // 残高のある(=使える)メンバー
+  const compMem=DB.members.filter(m=>!m.is_graduated&&compBalance(m.id)>0);
+  // そのリリースでまだ完売していないメンバー
+  const relMems=rel?membersInRelease(rel.id):[];
+  const stillOpen=relMems.filter(mid=>!isSoldOut(rel.id,mid));
+  return {now,rel,gid,cyc,thisWeek,wed,compMem,relMems,stillOpen};
+}
+
+function weeklyCardHtml(){
+  if(!weeklyCtx()) return "";
+  return `<div class="card"><div class="row" style="margin-bottom:4px">
+      <h3 style="margin:0">今週の申込</h3>
+      <span class="dim" id="wkHead" style="margin-left:auto;font-size:11px"></span>
+    </div><div id="wkList"></div></div>`;
+}
+
+let weeklyTimer=null;
+function startWeekly(){
+  if(weeklyTimer) clearInterval(weeklyTimer);
+  tickWeekly(); weeklyTimer=setInterval(tickWeekly,1000);
+}
+function tickWeekly(){
+  const box=document.getElementById("wkList");
+  if(!box){ if(weeklyTimer) clearInterval(weeklyTimer); weeklyTimer=null; return; }
+  const c=weeklyCtx(); if(!c){ box.innerHTML=""; return; }
+  const now=new Date(), L=c.cyc.lottery;
+  const head=document.getElementById("wkHead");
+  if(head) head.textContent=[(byId(DB.groups,c.gid)||{}).name, c.rel&&c.rel.label].filter(Boolean).join(" ・ ");
+
+  let h="";
+
+  // --- 無敵券: 開催週の水曜・その週の開催分のみ・先着 ---
+  // 残高が無い/今週に開催が無い ときは出さない(毎週出ると意味が薄れるため)
+  if(c.compMem.length && c.thisWeek.length){
+    const today0=new Date(now); today0.setHours(0,0,0,0);
+    const isToday=sameDay(c.wed,now), past=c.wed<today0;
+    const names=c.compMem.map(m=>`${m.name} 残${compBalance(m.id)}枚`).join(" / ");
+    const tgt=c.thisWeek.map(e=>{const x=mdw(e.event_date);return `${x.md}(${x.wd})`;}).join(" ");
+    h+=`<div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+      <div class="grow">
+        <div style="font-weight:600">${DOW_LABEL[c.cyc.comp.dow]} 無敵券 申込
+          <span class="pill close" style="margin-left:5px;font-size:10px">先着</span></div>
+        <div class="dim" style="font-size:12px">${esc(names)} → ${esc(tgt)} の開催分</div>
+      </div>
+      <div class="pill ${isToday?"close":past?"info":"gold"}" style="font-size:13px;padding:5px 11px">
+        ${isToday?"本日":past?"受付終了":"あと "+Math.ceil((c.wed-today0)/86400000)+"日"}</div>
+    </div>`;
+  }
+
+  // --- 通常申込(抽選) ---
+  if(c.relMems.length && !c.stillOpen.length){
+    h+=`<div class="row" style="padding:10px 0">
+      <div class="grow"><div style="font-weight:600" class="dim">通常申込</div>
+        <div class="dim" style="font-size:12px">${esc(c.rel.label)} は対象メンバーが完売済み</div></div>
+      <div class="pill info" style="font-size:13px;padding:5px 11px">完売</div></div>`;
+  }else{
+    const ph=lotteryPhase(L,now);
+    const sub = ph.key==="open"   ? `${DOW_LABEL[L.close_dow]} ${L.close_time} まで受付中`
+              : ph.key==="result" ? `${DOW_LABEL[L.result_dow]} ${L.result_time} 発表 → 記録を入力`
+              : `${DOW_LABEL[L.open_dow]} ${L.open_time} 開始 → ${DOW_LABEL[L.close_dow]} ${L.close_time} 締切`;
+    h+=`<div class="row" style="padding:10px 0">
+      <div class="grow">
+        <div style="font-weight:600">${esc(ph.title)}</div>
+        <div class="dim" style="font-size:12px">${esc(sub)}</div>
+      </div>
+      <div class="pill ${ph.cls}" style="font-size:13px;padding:5px 11px;font-variant-numeric:tabular-nums">
+        あと ${untilStr(ph.at-now)}</div>
+    </div>`;
+  }
+  box.innerHTML=h;
+}
+
+/* ---------- 申込サイクルの設定(データ編集内) ---------- */
+function cycleEditorHtml(gid){
+  const c=cycleOf(gid), L=c.lottery;
+  const dsel=(id,v)=>`<select id="${id}" style="padding:6px 8px;font-size:13px">
+    ${DOW_LABEL.map((w,i)=>`<option value="${i}" ${i===+v?"selected":""}>${w}</option>`).join("")}</select>`;
+  const tin=(id,v)=>`<input type="time" id="${id}" value="${v}" style="padding:6px 8px;font-size:13px">`;
+  return `<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">
+    <div class="dim" style="font-size:11px;margin-bottom:6px">申込サイクル(週次)</div>
+    <div class="row" style="gap:5px;padding:3px 0;font-size:12px">
+      <span style="width:52px">開始</span>${dsel("cy_od_"+gid,L.open_dow)}${tin("cy_ot_"+gid,L.open_time)}</div>
+    <div class="row" style="gap:5px;padding:3px 0;font-size:12px">
+      <span style="width:52px">締切</span>${dsel("cy_cd_"+gid,L.close_dow)}${tin("cy_ct_"+gid,L.close_time)}</div>
+    <div class="row" style="gap:5px;padding:3px 0;font-size:12px">
+      <span style="width:52px">発表</span>${dsel("cy_rd_"+gid,L.result_dow)}${tin("cy_rt_"+gid,L.result_time)}</div>
+    <div class="row" style="gap:5px;padding:3px 0;font-size:12px">
+      <span style="width:52px">無敵券</span>${dsel("cy_wd_"+gid,c.comp.dow)}
+      <span class="dim" style="font-size:11px">開催週のみ・先着</span></div>
+    <button class="btn sm ghost" style="margin-top:6px" onclick="saveCycle('${gid}')">サイクルを保存</button>
+  </div>`;
+}
+async function saveCycle(gid){
+  const g=byId(DB.groups,gid); if(!g) return;
+  const v=id=>(document.getElementById(id)||{}).value;
+  const cfg=Object.assign({},g.config||{},{cycle:{
+    lottery:{ open_dow:+v("cy_od_"+gid), open_time:v("cy_ot_"+gid),
+              close_dow:+v("cy_cd_"+gid), close_time:v("cy_ct_"+gid),
+              result_dow:+v("cy_rd_"+gid), result_time:v("cy_rt_"+gid) },
+    comp:{ dow:+v("cy_wd_"+gid) }
+  }});
+  g.config=cfg; await dbUpdate("groups",gid,{config:cfg});
+  toast("申込サイクルを保存しました");
+}
 
 /* =========================================================================
    無敵券の発行台帳 UI
@@ -1761,6 +1938,7 @@ function dataEditorBody(){
     }
     h+=`<button class="btn sm ghost" style="margin-top:6px" onclick="editCustomType('${g.id}',null)">＋ カスタム種別を追加</button>
       </div>`;
+    h+=cycleEditorHtml(g.id);
     h+=`</div>`;
   });
   return h;
