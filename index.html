@@ -131,6 +131,7 @@
   .datewrap input[type=date]:focus + .datedisp,
   .datewrap input[type=time]:focus + .datedisp{
     border-color:var(--acc);box-shadow:0 0 0 3px rgba(201,168,74,.15)}
+  input[type=checkbox]{width:18px;height:18px;accent-color:var(--acc);margin:0;flex:none}
   label.fld{display:block;font-size:12px;color:var(--txt2);margin:0 0 5px 2px}
   .field{margin-bottom:12px}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -1379,9 +1380,11 @@ function openCompIssue(mid){
     <div class="field"><label class="fld">欠席が出た開催日</label>
       <select id="ct_src" onchange="compAutofill()"><option value="">指定しない</option>
         ${evs.map(e=>`<option value="${e.id}">${esc(e.event_date)} ${esc(typeLabel(e.event_type))}</option>`).join("")}</select>
-      <p class="dim" style="font-size:11px;margin:5px 0 0">選ぶと、その日そのメンバーで当選していた枚数と日付を下に自動で入れます。</p></div>
+      <p class="dim" style="font-size:11px;margin:5px 0 0">選ぶと、その日そのメンバーで当選していた部が下に出ます。参加できた部のチェックを外してください。</p></div>
+    <div class="field" id="ct_bu_wrap" style="display:none"><label class="fld">無敵券になった部</label>
+      <div id="ct_bu" style="background:var(--bg2);border:1px solid var(--line2);border-radius:var(--r2);padding:4px 10px"></div></div>
     <div class="grid2">
-      <div class="field"><label class="fld">枚数</label>
+      <div class="field"><label class="fld">枚数(合計)</label>
         <input type="number" id="ct_qty" min="1" value="1"></div>
       <div class="field"><label class="fld">発行日</label>${dateField("ct_date",todayYmd,"発行日を選択")}</div>
     </div>
@@ -1389,7 +1392,7 @@ function openCompIssue(mid){
       <input type="text" id="ct_note" placeholder="体調不良で欠席 など"></div>
   `,async()=>{
     const qty=parseInt($("#ct_qty").value,10);
-    if(!(qty>0)){ toast("枚数を入力してください"); return false; }
+    if(!(qty>0)){ toast("枚数を入力してください(部のチェックが全部外れていませんか)"); return false; }
     const row=await dbInsert("comp_tickets",{
       member_id:$("#ct_mem").value, qty,
       issued_date:$("#ct_date").value||null,
@@ -1402,20 +1405,50 @@ function openCompIssue(mid){
   });
 }
 
-/* 欠席が出た開催日を選んだら、枚数と発行日を埋める。
-   メンバーが欠席すると、その日そのメンバーで当選していた分がそのまま
-   振替になるので、枚数は普通その日の当選枚数と一致する。 */
+/* 欠席が出た開催日を選んだら、その日そのメンバーで当選していた部を並べる。
+   欠席は1日まるごととは限らない。メンバー側の負担の都合で、出られる部だけ
+   出ることがある(例: 1〜3部は欠席、4・5部は参加)。振替になるのは実際に
+   欠席した部の分だけなので、部ごとにチェックを外せるようにする。 */
+let _ctAutoNote="";
 function compAutofill(){
   const mid=($("#ct_mem")||{}).value, eid=($("#ct_src")||{}).value;
-  if(!mid||!eid) return;
+  const wrap=document.getElementById("ct_bu_wrap"), box=document.getElementById("ct_bu");
+  if(!wrap||!box) return;
+  if(!mid||!eid){ wrap.style.display="none"; box.innerHTML=""; _ctAutoNote=""; return; }
   const ev=byId(DB.events,eid); if(!ev) return;
-  let n=0;
-  sessionsOf(eid).forEach(s=>DB.applications
-    .filter(a=>a.session_id===s.id && a.member_id===mid && !isComp(a))
-    .forEach(a=>n+=a.won||0));
-  if(n>0){ const q=$("#ct_qty"); if(q) q.value=n; }
+  const rows=[];
+  sessionsOf(eid).forEach(s=>{
+    let w=0;
+    DB.applications.filter(a=>a.session_id===s.id && a.member_id===mid && !isComp(a))
+      .forEach(a=>w+=a.won||0);
+    if(w>0) rows.push({s,w});
+  });
   const d=$("#ct_date");
   if(d){ d.value=ev.event_date; syncDateDisp("ct_date","発行日を選択"); }
+  wrap.style.display="";
+  if(!rows.length){
+    box.innerHTML=`<p class="dim" style="font-size:12px;padding:6px 0;margin:0">この日このメンバーの当選記録がありません。枚数は手で入れてください。</p>`;
+    _ctAutoNote=""; return;
+  }
+  box.innerHTML=rows.map(r=>`<label class="row" style="gap:10px;padding:7px 0;border-bottom:1px solid var(--line);cursor:pointer">
+      <input type="checkbox" class="ctbu" data-w="${r.w}" data-bu="${r.s.bu_no}" checked onchange="compSumBu()">
+      <span style="width:46px;font-weight:600"><span class="buchip" style="background:${buColor(r.s.bu_no)}"></span>${r.s.bu_no}部</span>
+      <span class="dim grow" style="font-size:12px">${r.s.start_time.slice(0,5)}–${r.s.end_time.slice(0,5)}</span>
+      <span style="font-weight:700">${r.w}枚</span>
+    </label>`).join("");
+  compSumBu();
+}
+// チェックされた部の枚数を合計して枚数欄とメモに反映する。
+// メモは自分で書き換えていたら上書きしない。
+function compSumBu(){
+  const cbs=[...document.querySelectorAll(".ctbu")];
+  if(!cbs.length) return;
+  const on=cbs.filter(c=>c.checked);
+  const q=$("#ct_qty"); if(q) q.value=on.reduce((n,c)=>n+(+c.dataset.w||0),0);
+  const auto=on.length?`${on.map(c=>c.dataset.bu+"部").join("・")} 欠席`:"";
+  const note=$("#ct_note");
+  if(note && (note.value===""||note.value===_ctAutoNote)) note.value=auto;
+  _ctAutoNote=auto;
 }
 
 // そのメンバーの発行履歴。使用分は応募行(kind='comp')側にあるので、ここは発行だけ。
