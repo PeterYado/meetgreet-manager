@@ -71,7 +71,7 @@
   nav.bottomnav button{
     background:none;border:none;color:var(--txt3);
     display:flex;flex-direction:column;align-items:center;gap:3px;
-    font-size:11px;padding:4px 10px;border-radius:10px;transition:.2s;min-width:60px;
+    font-size:11px;padding:4px 7px;border-radius:10px;transition:.2s;min-width:56px;
   }
   nav.bottomnav button .ic{font-size:21px;line-height:1}
   nav.bottomnav button.active{color:var(--acc)}
@@ -145,6 +145,35 @@
   .empty{text-align:center;color:var(--txt3);padding:34px 10px;font-size:14px}
   .empty .big{font-size:30px;display:block;margin-bottom:8px;opacity:.6}
   hr.sep{border:none;border-top:1px solid var(--line);margin:14px 0}
+
+  /* ---------- リリース・グリッド(一覧タブ) ----------
+     10年使ってきたスプレッドシートの「開催日シート」を、列を
+     メンバーから開催日に置き換えた形。横スクロール + 左列固定。 */
+  .gridwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -16px;padding:0 16px 2px}
+  table.mg{border-collapse:separate;border-spacing:0;width:auto;min-width:100%;
+    font-variant-numeric:tabular-nums}
+  table.mg th,table.mg td{padding:6px 7px;text-align:center;font-size:13px;white-space:nowrap;
+    border-bottom:1px solid var(--line)}
+  table.mg th.stick,table.mg td.stick{position:sticky;left:0;z-index:2;background:var(--card);
+    text-align:left;min-width:82px;box-shadow:1px 0 0 var(--line)}
+  table.mg thead th{font-size:11px;color:var(--txt2);font-weight:600;line-height:1.35}
+  table.mg thead th.dt{cursor:pointer}
+  table.mg thead th.dt .wd{display:block;font-weight:400;color:var(--txt3);font-size:10px}
+  .wd.sun{color:#e2585a} .wd.sat{color:#5b8fd4}
+  table.mg td.zero{color:var(--txt3)}
+  table.mg td.has{font-weight:700}
+  table.mg td.cell{cursor:pointer}
+  table.mg td.cell:active{background:var(--card2)}
+  table.mg tr.sum td{border-top:1px solid var(--line2);border-bottom:none;font-weight:700;padding-top:9px}
+  table.mg tr.sum td.stick{color:var(--txt2);font-weight:600}
+  table.mg td.tot,table.mg th.tot{background:var(--bg2)}
+  .buchip{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px;vertical-align:0}
+  .butime{font-size:11px;color:var(--txt3);font-weight:400;margin-left:5px}
+  .segbar{display:flex;gap:6px;background:var(--bg2);border:1px solid var(--line2);
+    border-radius:var(--r2);padding:3px;margin-bottom:12px}
+  .segbar button{flex:1;background:none;border:none;color:var(--txt2);font-size:13px;
+    padding:7px 4px;border-radius:7px;transition:.15s}
+  .segbar button.on{background:var(--card2);color:var(--txt);font-weight:600}
 </style>
 </head>
 <body>
@@ -446,12 +475,14 @@ function renderShell(){
   </div></header>
   <main><div class="wrap">
     <section class="tab" id="tab-home"></section>
+    <section class="tab" id="tab-grid"></section>
     <section class="tab" id="tab-events"></section>
     <section class="tab" id="tab-stats"></section>
     <section class="tab" id="tab-sim"></section>
   </div></main>
   <nav class="bottomnav">
     ${navBtn("home","今日","\u23F0")}
+    ${navBtn("grid","一覧","\u{1F3AB}")}
     ${navBtn("events","記録","\u{1F4CB}")}
     ${navBtn("stats","当選率","\u{1F4CA}")}
     ${navBtn("sim","応募計算","\u{1F3AF}")}
@@ -466,7 +497,7 @@ function switchTab(id){
   activeTab=id;
   document.querySelectorAll(".tab").forEach(s=>s.classList.toggle("active",s.id==="tab-"+id));
   document.querySelectorAll(".bottomnav button").forEach(b=>b.classList.toggle("active",b.dataset.tab===id));
-  ({home:renderHome,events:renderEvents,stats:renderStats,sim:renderSim}[id])();
+  ({home:renderHome,grid:renderGrid,events:renderEvents,stats:renderStats,sim:renderSim}[id])();
 }
 
 /* =========================================================================
@@ -789,7 +820,7 @@ function renderEventDetail(el){
   }
 
   let html=`<div class="row" style="margin:6px 0 14px">
-    <button class="btn sm ghost" onclick="selectedEventId=null;detailMemberId=null;renderEvents()">\u2039 一覧</button>
+    <button class="btn sm ghost" onclick="selectedEventId=null;detailMemberId=null;renderEvents()">\u2039 戻る</button>
     <h2 style="font-size:17px;margin-left:6px">${esc(e.event_date)} ${typeLabel(e.event_type)}</h2>
   </div>`;
 
@@ -959,6 +990,221 @@ async function delRelease(id){
   DB.releases=DB.releases.filter(r=>r.id!==id);
   DB.events=DB.events.filter(e=>e.release_id!==id);
   renderEvents();
+}
+
+
+/* =========================================================================
+   TAB: 一覧 (リリース・グリッド)  ★閲覧専用
+   行=部 / 列=開催日 のマトリクス。10年運用してきたスプレッドシートの
+   「開催日シート」(行=部 / 列=メンバー)を、列を開催日に置き換えた形。
+   1リリース分の保有枚数が1画面に収まる。
+   数値の編集はここでは行わない(誤操作防止)。編集は「記録」タブ。
+   ========================================================================= */
+let gridReleaseId=null, gridMemberId=null, gridMode="hold";   // hold=保有 / score=成績
+
+// 部番号の固定色(スプレッドシートの 1赤 2橙 3黄 4緑 5青 を踏襲)
+const BU_COLORS=["#e2585a","#e08a3b","#d3bb3c","#4fb286","#5b8fd4","#a07ad0","#5ac8c8","#c98fa8"];
+const buColor=n=>BU_COLORS[(n-1)%BU_COLORS.length];
+const WD=["日","月","火","水","木","金","土"];
+function mdw(ymd){
+  const d=new Date(ymd+"T00:00:00"), g=d.getDay();
+  return {md:`${d.getMonth()+1}/${d.getDate()}`, wd:WD[g],
+          cls:g===0?"wd sun":g===6?"wd sat":"wd"};     // 日=赤 / 土=青
+}
+function closeModals(){ document.querySelectorAll(".modalwrap").forEach(w=>w.remove()); }
+
+// そのリリースに応募記録があるメンバーID一覧
+function membersInRelease(rid){
+  const set=new Set();
+  eventsOf(rid).forEach(e=>membersInEvent(e.id).forEach(id=>set.add(id)));
+  return [...set];
+}
+
+/* リリース × メンバー のグリッド用データ。
+   cell["<event_id>:<bu_no>"] = {won, applied, rounds:[...], sess, ev} */
+function gridData(rid, mid){
+  const evs=eventsOf(rid);
+  const buSet=new Set(), times={}, cell={};
+  evs.forEach(e=>{
+    sessionsOf(e.id).forEach(s=>{
+      buSet.add(s.bu_no);
+      const t=s.start_time.slice(0,5);
+      (times[s.bu_no]=times[s.bu_no]||{})[t]=(times[s.bu_no][t]||0)+1;
+      const apps=DB.applications
+        .filter(a=>a.session_id===s.id && (!mid || a.member_id===mid))
+        .sort((a,b)=>a.round-b.round);
+      if(!apps.length) return;
+      const c=cell[e.id+":"+s.bu_no]={won:0,applied:0,rounds:[],sess:s,ev:e};
+      apps.forEach(a=>{
+        c.won+=a.won||0; c.applied+=a.applied||0;
+        c.rounds.push({round:a.round,applied:a.applied||0,won:a.won||0});
+      });
+    });
+  });
+  const bus=[...buSet].sort((a,b)=>a-b);
+  // 各部の代表時刻(最も多く使われている開始時刻)。開催日ごとに時刻が違っても1行で表せる。
+  const repTime=bu=>{
+    const t=Object.entries(times[bu]||{});
+    return t.length ? t.sort((a,b)=>b[1]-a[1])[0][0] : "";
+  };
+  return {evs,bus,cell,repTime};
+}
+
+function renderGrid(){
+  const el=$("#tab-grid");
+  const rels=DB.releases.slice().sort((a,b)=>(b.release_date||"")>(a.release_date||"")?1:-1);
+  if(!rels.length){
+    el.innerHTML=`<h2 style="font-size:19px;margin:6px 0 12px">一覧</h2>
+      <div class="card"><div class="empty"><span class="big">\u{1F4BF}</span>
+      まだリリースがありません。<br>「記録」タブから追加してください。</div></div>`;
+    return;
+  }
+  if(!gridReleaseId || !byId(DB.releases,gridReleaseId)) gridReleaseId=rels[0].id;
+  const rel=byId(DB.releases,gridReleaseId);
+  const mems=membersInRelease(gridReleaseId);
+  if(!gridMemberId || !mems.includes(gridMemberId)){
+    gridMemberId = mems.find(id=>byId(DB.members,id)?.is_oshi) || mems[0] || null;
+  }
+
+  let h=`<div class="row" style="margin:6px 0 12px">
+    <h2 style="font-size:19px">一覧</h2>
+    ${gridMemberId?`<span class="pill gold" style="margin-left:auto">${esc(memberName(gridMemberId))}</span>`:""}
+  </div>`;
+
+  // 選択UIはラベルなしの1行に。メンバーが複数いるリリースのときだけ2列。
+  const relSel=`<select onchange="gridReleaseId=this.value;gridMemberId=null;renderGrid()">
+      ${rels.map(r=>`<option value="${r.id}" ${r.id===gridReleaseId?"selected":""}>${esc(r.label)}</option>`).join("")}
+    </select>`;
+  const memSel=`<select onchange="gridMemberId=this.value;renderGrid()">
+      ${mems.map(id=>`<option value="${id}" ${id===gridMemberId?"selected":""}>${esc(memberName(id))}${byId(DB.members,id)?.is_oshi?" ★":""}</option>`).join("")}
+    </select>`;
+  h+= mems.length>1 ? `<div class="grid2" style="margin-bottom:12px">${relSel}${memSel}</div>`
+                    : `<div style="margin-bottom:12px">${relSel}</div>`;
+
+  h+=`<div class="segbar">
+    <button class="${gridMode==="hold"?"on":""}" onclick="gridMode='hold';renderGrid()">保有</button>
+    <button class="${gridMode==="score"?"on":""}" onclick="gridMode='score';renderGrid()">成績</button>
+  </div>`;
+
+  h += (gridMode==="score") ? gridScoreHtml(gridReleaseId,gridMemberId)
+                            : gridHoldHtml(gridReleaseId,gridMemberId);
+  el.innerHTML=h;
+}
+
+/* --- 保有モード: 行=部 / 列=開催日 のマトリクス --- */
+function gridHoldHtml(rid, mid){
+  const {evs,bus,cell,repTime}=gridData(rid,mid);
+  if(!evs.length) return `<div class="card"><div class="empty">このリリースにはまだ開催日がありません。</div></div>`;
+  if(!bus.length)  return `<div class="card"><div class="empty">部が登録されていません。</div></div>`;
+
+  const colTot={}, rowTot={}; let grand=0;
+  bus.forEach(bu=>rowTot[bu]=0);
+  evs.forEach(e=>colTot[e.id]=0);
+  bus.forEach(bu=>evs.forEach(e=>{
+    const c=cell[e.id+":"+bu]; if(!c) return;
+    rowTot[bu]+=c.won; colTot[e.id]+=c.won; grand+=c.won;
+  }));
+
+  let h=`<div class="card"><div class="gridwrap"><table class="mg">
+    <thead><tr><th class="stick"></th>`;
+  evs.forEach(e=>{
+    const {md,wd,cls}=mdw(e.event_date);
+    h+=`<th class="dt" onclick="openEvent('${e.id}')">${md}<span class="${cls}">${wd}</span></th>`;
+  });
+  h+=`<th class="tot">計</th></tr></thead><tbody>`;
+  bus.forEach(bu=>{
+    h+=`<tr><td class="stick"><span class="buchip" style="background:${buColor(bu)}"></span>${bu}部`
+      +`<span class="butime">${repTime(bu)}</span></td>`;
+    evs.forEach(e=>{
+      const c=cell[e.id+":"+bu];
+      h+= (c && c.won)
+        ? `<td class="cell has" onclick="gridCell('${e.id}',${bu})">${c.won}</td>`
+        : `<td class="zero">・</td>`;
+    });
+    h+=`<td class="tot ${rowTot[bu]?"has":"zero"}">${rowTot[bu]||"・"}</td></tr>`;
+  });
+  h+=`<tr class="sum"><td class="stick">計</td>`;
+  evs.forEach(e=>h+=`<td>${colTot[e.id]||"・"}</td>`);
+  h+=`<td class="tot" style="color:var(--acc)">${grand}</td></tr>`;
+  h+=`</tbody></table></div>
+    <p class="dim" style="font-size:11px;margin:12px 0 0">数字は当選(保有)枚数。セルをタップで回次別の内訳、日付をタップで「記録」の詳細へ。このタブでは数値は変更されません。</p>
+  </div>`;
+  return h;
+}
+
+/* --- セル詳細(回次別の内訳)。閲覧のみ --- */
+function gridCell(eid,bu){
+  const {cell}=gridData(gridReleaseId,gridMemberId);
+  const c=cell[eid+":"+bu]; if(!c) return;
+  const s=c.sess, e=c.ev;
+  const rows=c.rounds.map(r=>`<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line)">
+      <span style="width:52px;font-weight:600">${r.round}次</span>
+      <span class="dim grow" style="font-size:12px">申請 ${r.applied}</span>
+      <span style="font-weight:700">当選 ${r.won}</span></div>`).join("");
+  openModal(`${formatDateDisp(e.event_date)}  ${bu}部`,`
+    <div class="row" style="gap:8px;margin-bottom:12px;flex-wrap:wrap">
+      <span class="pill ${typePillClass(e.event_type)}">${esc(typeLabel(e.event_type))}</span>
+      <span class="dim" style="font-size:12px">${s.start_time.slice(0,5)}–${s.end_time.slice(0,5)}</span>
+      <span class="pill close" style="margin-left:auto">締切 ${(s.receipt_close||"").slice(0,5)}</span>
+    </div>
+    <div class="dim" style="font-size:12px;margin-bottom:4px">${esc(memberName(gridMemberId))}</div>
+    ${rows||`<div class="dim" style="font-size:13px">記録なし</div>`}
+    <div class="row" style="padding:10px 0 0">
+      <span class="grow"></span>
+      <span style="font-weight:700;color:var(--acc)">合計 ${c.won}枚</span></div>
+    ${s.topic?`<p class="dim" style="font-size:12px;margin:10px 0 0">\u{1F4AC} ${esc(s.topic)}</p>`:""}
+    <button class="btn ghost" style="width:100%;margin-top:16px" onclick="closeModals();openEvent('${e.id}')">「記録」で編集する</button>
+  `, async()=>true);
+  // 閲覧専用モーダル。保存/キャンセルは不要なので「閉じる」だけ残す。
+  ["mOk","mCancel"].forEach(id=>{ const b=document.getElementById(id); if(b) b.style.display="none"; });
+}
+
+/* --- 成績モード: 回次ごとに 行=開催日 / 列=申請・当選・当選率 + 累計 --- */
+function gridScoreHtml(rid, mid){
+  const evs=eventsOf(rid);
+  if(!evs.length) return `<div class="card"><div class="empty">このリリースにはまだ開催日がありません。</div></div>`;
+  const roundSet=new Set(), m={};
+  evs.forEach(e=>sessionsOf(e.id).forEach(s=>{
+    DB.applications.filter(a=>a.session_id===s.id && (!mid||a.member_id===mid)).forEach(a=>{
+      roundSet.add(a.round);
+      const r=(m[a.round]=m[a.round]||{});
+      const c=(r[e.id]=r[e.id]||{applied:0,won:0});
+      c.applied+=a.applied||0; c.won+=a.won||0;
+    });
+  }));
+  const rs=[...roundSet].sort((a,b)=>a-b);
+  if(!rs.length) return `<div class="card"><div class="empty">このリリースの応募記録がありません。<br>「記録」タブで申請・当選を入力してください。</div></div>`;
+
+  const pct=(w,a)=>a?(Math.round(w/a*1000)/10)+"%":"—";
+  const col=(w,a)=>!a?"var(--txt3)":(w/a>=.5?"var(--ok)":w/a>=.3?"var(--warn)":"var(--danger)");
+  let h="", cumA=0, cumW=0;
+  rs.forEach((r,i)=>{
+    const per=m[r]||{};
+    let sa=0,sw=0;
+    h+=`<div class="card"><h3 style="color:var(--acc);text-transform:none;font-size:14px">${r}次</h3>
+      <div class="gridwrap"><table class="mg"><thead><tr>
+        <th class="stick">開催日</th><th>申請</th><th>当選</th><th class="tot">当選率</th>
+      </tr></thead><tbody>`;
+    evs.forEach(e=>{
+      const c=per[e.id]||{applied:0,won:0};
+      sa+=c.applied; sw+=c.won;
+      const {md,wd,cls}=mdw(e.event_date);
+      h+=`<tr><td class="stick">${md}<span class="butime ${cls}">${wd}</span></td>
+        <td class="${c.applied?"":"zero"}">${c.applied||"・"}</td>
+        <td class="${c.won?"has":"zero"}">${c.won||"・"}</td>
+        <td class="tot" style="color:${col(c.won,c.applied)};font-weight:600">${pct(c.won,c.applied)}</td></tr>`;
+    });
+    cumA+=sa; cumW+=sw;
+    h+=`<tr class="sum"><td class="stick">計</td><td>${sa}</td><td>${sw}</td>
+      <td class="tot" style="color:${col(sw,sa)}">${pct(sw,sa)}</td></tr>`;
+    if(i>0){
+      h+=`<tr class="sum"><td class="stick" style="font-size:11px">${rs.slice(0,i+1).map(x=>x+"次").join("+")}</td>
+        <td>${cumA}</td><td>${cumW}</td>
+        <td class="tot" style="color:${col(cumW,cumA)}">${pct(cumW,cumA)}</td></tr>`;
+    }
+    h+=`</tbody></table></div></div>`;
+  });
+  return h;
 }
 
 /* =========================================================================
@@ -1239,6 +1485,7 @@ function simCalc(){
    ========================================================================= */
 function openModal(title,bodyHtml,onOk){
   const wrap=document.createElement("div");
+  wrap.className="modalwrap";
   wrap.style.cssText="position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.6);display:flex;align-items:flex-end;justify-content:center;padding:0";
   wrap.innerHTML=`<div style="background:var(--card);border:1px solid var(--line2);border-radius:18px 18px 0 0;width:100%;max-width:560px;max-height:88vh;overflow:auto;padding:18px 18px calc(20px + env(safe-area-inset-bottom))">
     <div class="row" style="margin-bottom:14px"><h2 style="font-size:17px">${esc(title)}</h2>
