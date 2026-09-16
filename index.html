@@ -71,7 +71,7 @@
   nav.bottomnav button{
     background:none;border:none;color:var(--txt3);
     display:flex;flex-direction:column;align-items:center;gap:3px;
-    font-size:11px;padding:4px 10px;border-radius:10px;transition:.2s;min-width:60px;
+    font-size:11px;padding:4px 7px;border-radius:10px;transition:.2s;min-width:56px;
   }
   nav.bottomnav button .ic{font-size:21px;line-height:1}
   nav.bottomnav button.active{color:var(--acc)}
@@ -145,6 +145,37 @@
   .empty{text-align:center;color:var(--txt3);padding:34px 10px;font-size:14px}
   .empty .big{font-size:30px;display:block;margin-bottom:8px;opacity:.6}
   hr.sep{border:none;border-top:1px solid var(--line);margin:14px 0}
+
+  /* ---------- リリース・グリッド(一覧タブ) ----------
+     10年使ってきたスプレッドシートの「開催日シート」を、列を
+     メンバーから開催日に置き換えた形。横スクロール + 左列固定。 */
+  .gridwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -16px;padding:0 16px 2px}
+  table.mg{border-collapse:separate;border-spacing:0;width:auto;min-width:100%;
+    font-variant-numeric:tabular-nums}
+  table.mg th,table.mg td{padding:6px 7px;text-align:center;font-size:13px;white-space:nowrap;
+    border-bottom:1px solid var(--line)}
+  table.mg th.stick,table.mg td.stick{position:sticky;left:0;z-index:2;background:var(--card);
+    text-align:left;min-width:82px;box-shadow:1px 0 0 var(--line)}
+  table.mg thead th{font-size:11px;color:var(--txt2);font-weight:600;line-height:1.35}
+  table.mg thead th.dt{cursor:pointer}
+  table.mg thead th.dt .wd{display:block;font-weight:400;color:var(--txt3);font-size:10px}
+  .wd.sun{color:#e2585a} .wd.sat{color:#5b8fd4}
+  table.mg td.zero{color:var(--txt3)}
+  table.mg td.has{font-weight:700}
+  table.mg td.cell{cursor:pointer;position:relative}
+  .cdot{position:absolute;top:3px;right:3px;width:5px;height:5px;border-radius:50%;
+    background:var(--acc);box-shadow:0 0 4px rgba(201,168,74,.8)}
+  table.mg td.cell:active{background:var(--card2)}
+  table.mg tr.sum td{border-top:1px solid var(--line2);border-bottom:none;font-weight:700;padding-top:9px}
+  table.mg tr.sum td.stick{color:var(--txt2);font-weight:600}
+  table.mg td.tot,table.mg th.tot{background:var(--bg2)}
+  .buchip{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px;vertical-align:0}
+  .butime{font-size:11px;color:var(--txt3);font-weight:400;margin-left:5px}
+  .segbar{display:flex;gap:6px;background:var(--bg2);border:1px solid var(--line2);
+    border-radius:var(--r2);padding:3px;margin-bottom:12px}
+  .segbar button{flex:1;background:none;border:none;color:var(--txt2);font-size:13px;
+    padding:7px 4px;border-radius:7px;transition:.15s}
+  .segbar button.on{background:var(--card2);color:var(--txt);font-weight:600}
 </style>
 </head>
 <body>
@@ -240,8 +271,9 @@ function typePillClass(type){
 
 /* ---------- グローバル状態 ---------- */
 let sb=null, USER=null;
-const DB={ groups:[],members:[],releases:[],events:[],sessions:[],applications:[] };
-let SETTINGS={ yearGoal:0, customTypes:[] };   // customTypes: ユーザー定義の種別テンプレ
+const DB={ groups:[],members:[],releases:[],events:[],sessions:[],applications:[],
+           comp_tickets:[],release_members:[] };
+let SETTINGS={ yearGoal:0, customTypes:[], typeRules:{} };  // customTypes: ユーザー定義の種別テンプレ / typeRules: 種別ごとの上限・単価
 let activeTab="home";
 let selectedReleaseId=null, selectedEventId=null;
 
@@ -266,15 +298,17 @@ const tbl=name=>TBL_PREFIX+name;
 /* ---------- データ取得(開いた時に読み込む方式) ---------- */
 async function loadAll(){
   setSync("saving","読込中…");
-  const tables=["groups","members","releases","events","sessions","applications"];
+  const tables=["groups","members","releases","events","sessions","applications",
+                "comp_tickets","release_members"];
   for(const t of tables){
     const {data,error}=await sb.from(tbl(t)).select("*");
     if(error){ console.error(t,error); setSync("err"); toast("読込失敗: "+t); return false; }
     DB[t]=data||[];
   }
   const {data:st}=await sb.from(tbl("app_settings")).select("data").eq("user_id",USER.id).maybeSingle();
-  if(st&&st.data) SETTINGS=Object.assign({yearGoal:0,customTypes:[]},st.data);
+  if(st&&st.data) SETTINGS=Object.assign({yearGoal:0,customTypes:[],typeRules:{}},st.data);
   if(!Array.isArray(SETTINGS.customTypes)) SETTINGS.customTypes=[];
+  if(!SETTINGS.typeRules || typeof SETTINGS.typeRules!=="object") SETTINGS.typeRules={};
   setSync("ok"); 
   return true;
 }
@@ -312,7 +346,29 @@ const sessionsOf=eid=>DB.sessions.filter(s=>s.event_id===eid).sort((a,b)=>a.bu_n
 const appsOf=sid=>DB.applications.filter(a=>a.session_id===sid);
 const appsOfSM=(sid,mid)=>DB.applications.filter(a=>a.session_id===sid&&a.member_id===mid).sort((a,b)=>a.round-b.round);
 // その部の当選合計(全メンバー)。homeや一覧の「当選枚数」表示用。
+// 無敵券も「その日持っている枚数」なので保有系の合計には含める。
 const wonOfSession=sid=>appsOf(sid).reduce((n,a)=>n+(a.won||0),0);
+
+/* ---------- 無敵券(メンバー欠席の振替券) ----------
+   抽選を経ていないので、当選率の分子・分母どちらにも入れてはいけない。
+   費用(個握券)にも含めない。保有枚数にだけ効く。
+   残高 = 発行合計 − 使用合計。有効期限は実質なし(卒業まで)。 */
+const isComp = a => a.kind === "comp";
+const compIssued = mid => DB.comp_tickets
+  .filter(t=>t.member_id===mid).reduce((n,t)=>n+(t.qty||0),0);
+const compUsed = mid => DB.applications
+  .filter(a=>isComp(a)&&a.member_id===mid).reduce((n,a)=>n+(a.won||0),0);
+const compBalance = mid => compIssued(mid)-compUsed(mid);
+// 発行または使用の記録があるメンバー(卒業者は残高が使えないので除く)
+function membersWithComp(){
+  return DB.members.filter(m=>!m.is_graduated && (compIssued(m.id)>0||compUsed(m.id)>0));
+}
+
+/* ---------- 完売(リリース × メンバー) ----------
+   完売の速さはメンバーごとに違う。完売後に増える枚数は抽選由来ではないが、
+   無敵券は完売前にも使えるため自動判定はせず、入力ボタンの既定を変えるだけ。 */
+const soldOutRow = (rid,mid) => DB.release_members.find(x=>x.release_id===rid&&x.member_id===mid)||null;
+const isSoldOut  = (rid,mid) => !!(soldOutRow(rid,mid)||{}).sold_out;
 // そのイベントに登場するメンバーID一覧(応募行があるメンバー)。
 const membersInEvent=eid=>{
   const set=new Set();
@@ -446,12 +502,14 @@ function renderShell(){
   </div></header>
   <main><div class="wrap">
     <section class="tab" id="tab-home"></section>
+    <section class="tab" id="tab-grid"></section>
     <section class="tab" id="tab-events"></section>
     <section class="tab" id="tab-stats"></section>
     <section class="tab" id="tab-sim"></section>
   </div></main>
   <nav class="bottomnav">
     ${navBtn("home","今日","\u23F0")}
+    ${navBtn("grid","一覧","\u{1F3AB}")}
     ${navBtn("events","記録","\u{1F4CB}")}
     ${navBtn("stats","当選率","\u{1F4CA}")}
     ${navBtn("sim","応募計算","\u{1F3AF}")}
@@ -466,7 +524,7 @@ function switchTab(id){
   activeTab=id;
   document.querySelectorAll(".tab").forEach(s=>s.classList.toggle("active",s.id==="tab-"+id));
   document.querySelectorAll(".bottomnav button").forEach(b=>b.classList.toggle("active",b.dataset.tab===id));
-  ({home:renderHome,events:renderEvents,stats:renderStats,sim:renderSim}[id])();
+  ({home:renderHome,grid:renderGrid,events:renderEvents,stats:renderStats,sim:renderSim}[id])();
 }
 
 /* =========================================================================
@@ -509,6 +567,9 @@ function renderHome(){
     </div>`;
   }
 
+  // --- 今週の申込サイクル(木15時開始→金14時締切→金18時発表 / 水は無敵券) ---
+  html+=weeklyCardHtml();
+
   // --- 直近の開催タイムライン ---
   html+=`<div class="card"><h3>直近の開催</h3>`;
   if(!upcoming.length){
@@ -531,6 +592,9 @@ function renderHome(){
   }
   html+=`</div>`;
 
+  // --- 無敵券 残高 ---
+  html+=compCardHtml();
+
   // --- 年間サマリ ---
   const stat=yearStats(today.getFullYear());
   html+=`<div class="card"><h3>${today.getFullYear()}年 サマリ</h3>
@@ -552,6 +616,7 @@ function renderHome(){
 
   el.innerHTML=html;
   if(todaySessions.length) startCountdown(todaySessions);
+  startWeekly();
 }
 
 function miniStat(label,val){
@@ -565,15 +630,19 @@ function daysLeft(ymd){
   return Math.round((d-t)/86400000);
 }
 function yearStats(year){
-  let won=0,events=0,applied=0;
+  // won = 保有(参加)枚数なので無敵券も含む。当選率は抽選分だけで出す。
+  let won=0,events=0,applied=0,lotWon=0;
   DB.events.forEach(e=>{
     if(!e.event_date.startsWith(year+"-")) return;
     events++;
     sessionsOf(e.id).forEach(s=>{
-      appsOf(s.id).forEach(ap=>{applied+=ap.applied||0;won+=ap.won||0;});
+      appsOf(s.id).forEach(ap=>{
+        won+=ap.won||0;
+        if(!isComp(ap)){ applied+=ap.applied||0; lotWon+=ap.won||0; }
+      });
     });
   });
-  return {won,events,rate:applied?Math.round(won/applied*100)+"%":"—"};
+  return {won,events,rate:applied?Math.round(lotWon/applied*100)+"%":"—"};
 }
 function startCountdown(list){
   if(countdownTimer) clearInterval(countdownTimer);
@@ -789,7 +858,7 @@ function renderEventDetail(el){
   }
 
   let html=`<div class="row" style="margin:6px 0 14px">
-    <button class="btn sm ghost" onclick="selectedEventId=null;detailMemberId=null;renderEvents()">\u2039 一覧</button>
+    <button class="btn sm ghost" onclick="selectedEventId=null;detailMemberId=null;renderEvents()">\u2039 戻る</button>
     <h2 style="font-size:17px;margin-left:6px">${esc(e.event_date)} ${typeLabel(e.event_type)}</h2>
   </div>`;
 
@@ -809,7 +878,15 @@ function renderEventDetail(el){
         <option value="__new">＋ 新しいメンバー…</option>
       </select>
     </div>
-    <p class="dim" style="font-size:11px;margin:8px 0 0">応募・当選はこのメンバーの記録として保存されます。当選率もメンバー別に集計されます。</p>
+    ${detailMemberId?(()=>{
+      const so=soldOutRow(e.release_id,detailMemberId), sold=!!(so&&so.sold_out);
+      const bal=compBalance(detailMemberId);
+      return `<div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="btn sm ${sold?"primary":"ghost"}" onclick="toggleSoldOut('${e.release_id}')">
+          ${sold?`完売済み${so.sold_out_round?` (${so.sold_out_round}次)`:""}`:"このリリースは完売"}</button>
+        <span class="dim" style="font-size:11px;margin-left:auto">無敵券 残 <b style="color:${bal>0?"var(--acc)":"var(--txt3)"}">${bal}</b>枚</span>
+      </div>`;})():""}
+    <p class="dim" style="font-size:11px;margin:8px 0 0">応募・当選はこのメンバーの記録として保存されます。完売にすると、各部の入力ボタンが「無敵券」優先に切り替わります。</p>
   </div>`;
 
   if(!detailMemberId){
@@ -820,9 +897,12 @@ function renderEventDetail(el){
   // --- 部ごとカード(対象メンバーの回次別 申請/当選) ---
   ss.forEach(s=>{
     const apps=appsOfSM(s.id,detailMemberId);
-    const wonTotal=apps.reduce((n,a)=>n+(a.won||0),0);
-    const appTotal=apps.reduce((n,a)=>n+(a.applied||0),0);
-    const rateAll=appTotal?Math.round(wonTotal/appTotal*100):null;
+    const wonTotal=apps.reduce((n,a)=>n+(a.won||0),0);            // 保有枚数(無敵券込み)
+    const lot=apps.filter(a=>!isComp(a));
+    const appTotal=lot.reduce((n,a)=>n+(a.applied||0),0);
+    const lotWon  =lot.reduce((n,a)=>n+(a.won||0),0);
+    const compWon =wonTotal-lotWon;
+    const rateAll=appTotal?Math.round(lotWon/appTotal*100):null;   // 当選率は抽選分のみ
     html+=`<div class="card">
       <div class="row">
         <h3 style="text-transform:none;color:var(--txt);font-size:15px">${s.bu_no}部
@@ -838,11 +918,19 @@ function renderEventDetail(el){
 
       <div class="row" style="margin:10px 0 4px">
         <span style="font-size:12px;color:var(--txt2)">応募 / 当選 (回次別)</span>
-        ${rateAll!=null?`<span class="dim" style="font-size:11px;margin-left:auto">この部 計 当選${wonTotal}/申請${appTotal} ・ ${rateAll}%</span>`:""}
+        ${rateAll!=null?`<span class="dim" style="font-size:11px;margin-left:auto">当選${lotWon}/申請${appTotal} ・ ${rateAll}%${compWon?` <span style="color:var(--acc)">+無敵${compWon}</span>`:""}</span>`:
+          (compWon?`<span class="dim" style="font-size:11px;margin-left:auto"><span style="color:var(--acc)">無敵券 ${compWon}枚</span></span>`:"")}
       </div>
       <table style="font-size:13px"><tr class="dim" style="font-size:11px">
         <td>回次</td><td style="text-align:center">申請</td><td style="text-align:center">当選</td><td style="text-align:center">当選率</td><td></td></tr>
-        ${apps.map(a=>`<tr>
+        ${apps.map(a=>isComp(a)?`<tr>
+          <td style="padding:4px 0;color:var(--acc);font-weight:600">無敵券</td>
+          <td style="text-align:center" class="dim">—</td>
+          <td style="text-align:center"><input type="number" min="0" value="${a.won}" style="width:60px;text-align:center;padding:5px"
+              onchange="updApp('${a.id}','won',this.value)"></td>
+          <td style="text-align:center" class="dim">抽選なし</td>
+          <td style="text-align:right"><button class="btn sm ghost danger" style="padding:3px 7px" onclick="delApp('${a.id}')">×</button></td>
+        </tr>`:`<tr>
           <td style="padding:4px 0">${a.round}次</td>
           <td style="text-align:center"><input type="number" min="0" value="${a.applied}" style="width:60px;text-align:center;padding:5px"
               onchange="updApp('${a.id}','applied',this.value)"></td>
@@ -853,7 +941,13 @@ function renderEventDetail(el){
           <td style="text-align:right"><button class="btn sm ghost danger" style="padding:3px 7px" onclick="delApp('${a.id}')">×</button></td>
         </tr>`).join("")}
       </table>
-      <button class="btn sm ghost" style="margin-top:6px" onclick="addApp('${s.id}')">＋ 回次を追加</button>
+      <div class="row" style="gap:8px;margin-top:6px">
+        ${isSoldOut(e.release_id,detailMemberId)
+          ? `<button class="btn sm primary" onclick="addComp('${s.id}')">＋ 無敵券</button>
+             <button class="btn sm ghost" onclick="addApp('${s.id}')">＋ 回次</button>`
+          : `<button class="btn sm ghost" onclick="addApp('${s.id}')">＋ 回次を追加</button>
+             <button class="btn sm ghost" onclick="addComp('${s.id}')">＋ 無敵券</button>`}
+      </div>
     </div>`;
   });
 
@@ -916,13 +1010,46 @@ async function changeDetailMember(v){
 
 /* ---------- 入力ハンドラ(楽観的更新) ---------- */
 async function updTopic(sid,v){ const s=byId(DB.sessions,sid); s.topic=v; await dbUpdate("sessions",sid,{topic:v}); }
-async function updApp(id,field,v){ const a=byId(DB.applications,id); a[field]=+v||0; renderEvents();
-  await dbUpdate("applications",id,{[field]:+v||0}); }
+async function updApp(id,field,v){
+  const a=byId(DB.applications,id); a[field]=+v||0; renderEvents();
+  // 無敵券は発行済み残高を超えて使えない。発行の登録漏れもあり得るので保存はする。
+  if(isComp(a)&&field==="won"&&compBalance(a.member_id)<0)
+    toast(`無敵券の残高を ${-compBalance(a.member_id)}枚 超えています`);
+  await dbUpdate("applications",id,{[field]:+v||0});
+}
 async function addApp(sid){
   if(!detailMemberId){ toast("対象メンバーを選んでください"); return; }
-  const ex=appsOfSM(sid,detailMemberId).map(a=>a.round); let r=1; while(ex.includes(r)) r++;
-  const row=await dbInsert("applications",{session_id:sid,member_id:detailMemberId,round:r,applied:0,won:0});
+  const ex=appsOfSM(sid,detailMemberId).filter(a=>!isComp(a)).map(a=>a.round);
+  let r=1; while(ex.includes(r)) r++;
+  const row=await dbInsert("applications",{session_id:sid,member_id:detailMemberId,round:r,applied:0,won:0,kind:"lottery"});
   DB.applications.push(row); renderEvents();
+}
+// 無敵券の行。抽選を経ないので round は 0、申請は常に 0(DB側のCHECKと一致)。
+async function addComp(sid){
+  if(!detailMemberId){ toast("対象メンバーを選んでください"); return; }
+  if(appsOfSM(sid,detailMemberId).some(isComp)){ toast("この部には既に無敵券の行があります"); return; }
+  const row=await dbInsert("applications",{session_id:sid,member_id:detailMemberId,round:0,applied:0,won:0,kind:"comp"});
+  DB.applications.push(row); renderEvents();
+}
+// 完売の切替。オンにするとき、そのリリースでこのメンバーが応募した最大回次を記録する。
+async function toggleSoldOut(rid){
+  if(!detailMemberId) return;
+  const cur=soldOutRow(rid,detailMemberId);
+  const next=!(cur&&cur.sold_out);
+  let maxRound=null;
+  if(next){
+    eventsOf(rid).forEach(ev=>sessionsOf(ev.id).forEach(s=>
+      appsOfSM(s.id,detailMemberId).forEach(a=>{
+        if(!isComp(a)&&(a.applied||0)>0) maxRound=Math.max(maxRound||0,a.round);
+      })));
+  }
+  const patch={sold_out:next, sold_out_round:next?maxRound:null, updated_at:new Date().toISOString()};
+  if(cur){ Object.assign(cur,patch); await dbUpdate("release_members",cur.id,patch); }
+  else{
+    const row=await dbInsert("release_members",Object.assign({release_id:rid,member_id:detailMemberId},patch));
+    DB.release_members.push(row);
+  }
+  toast(next?"完売にしました":"完売を解除しました"); renderEvents();
 }
 async function delApp(id){ DB.applications=DB.applications.filter(a=>a.id!==id); renderEvents(); await dbDelete("applications",id); }
 
@@ -959,6 +1086,570 @@ async function delRelease(id){
   DB.releases=DB.releases.filter(r=>r.id!==id);
   DB.events=DB.events.filter(e=>e.release_id!==id);
   renderEvents();
+}
+
+
+/* =========================================================================
+   種別ごとの制度差(支払いの向き・当選上限・単価)
+   個別      : 当選した枚数だけ後から 1200円 の CD を買う。当選上限なし。
+               (代わりに回次ごとの申請上限がある)
+   全国/リアル: 先に CD を買い、同梱シリアルで応募する。申請上限は無いが
+               1部あたりの当選上限があり、超えて入れた分はそのまま無駄になる。
+   ルールは稀に変わるのでデータで持ち、データ編集から変更できるようにする。
+   ========================================================================= */
+const TYPE_RULES_DEFAULT={
+  kojin_online:   {payment:"post", unitPrice:1200, winCap:null},
+  kojin_akushu:   {payment:"post", unitPrice:1200, winCap:null},
+  zenkoku_online: {payment:"pre",  unitPrice:1653, winCap:10},
+  real_meetgreet: {payment:"pre",  unitPrice:1653, winCap:10},
+  custom:         {payment:"post", unitPrice:null, winCap:null}
+};
+function typeRule(type){
+  const ct=customTypeById(type);
+  if(ct) return Object.assign({payment:"post",unitPrice:null,winCap:null}, ct.rule||{});
+  return Object.assign({}, TYPE_RULES_DEFAULT[type]||TYPE_RULES_DEFAULT.custom,
+                       (SETTINGS.typeRules||{})[type]||{});
+}
+// 上限に届かせるのに要る枚数。上限が無い/実績が無いときは null。
+function needForCap(rate,cap){
+  return (cap!=null && rate>0) ? Math.ceil(cap/rate) : null;
+}
+const yen=n=>"¥"+Math.round(n).toLocaleString("ja-JP");
+
+/* ---------- 種別の設定エディタ(データ編集の先頭に1回だけ) ---------- */
+function typeRulesEditorHtml(){
+  const keys=["kojin_online","kojin_akushu","zenkoku_online","real_meetgreet"];
+  return `<div style="border:1px solid var(--line2);border-radius:var(--r2);padding:12px;margin-bottom:12px">
+    <div class="dim" style="font-size:11px;margin-bottom:8px">種別の設定(当選上限・単価・支払い)</div>
+    ${keys.map(k=>{
+      const r=typeRule(k);
+      return `<div style="padding:6px 0;border-bottom:1px solid var(--line)">
+        <div style="font-size:13px;font-weight:600;margin-bottom:5px">${esc(EVENT_TYPE_LABEL[k])}</div>
+        <div class="row" style="gap:6px">
+          <span class="dim" style="font-size:11px;width:56px">当選上限</span>
+          <input type="number" id="tr_cap_${k}" min="0" placeholder="なし" value="${r.winCap??""}"
+            style="width:74px;padding:5px;font-size:13px">
+          <span class="dim" style="font-size:11px;width:34px">単価</span>
+          <input type="number" id="tr_pr_${k}" min="0" value="${r.unitPrice??""}"
+            style="width:82px;padding:5px;font-size:13px">
+          <select id="tr_pay_${k}" style="padding:5px;font-size:13px;width:auto">
+            <option value="post" ${r.payment==="post"?"selected":""}>後払い</option>
+            <option value="pre"  ${r.payment==="pre" ?"selected":""}>先払い</option>
+          </select>
+        </div></div>`;
+    }).join("")}
+    <p class="dim" style="font-size:11px;margin:8px 0 6px">先払い(全国/リアル)は落選するとCD代が無駄になるため、応募計算で過剰分の金額を出します。当選上限を空にすると上限なしとして扱います。</p>
+    <button class="btn sm ghost" onclick="saveTypeRules()">種別の設定を保存</button>
+  </div>`;
+}
+async function saveTypeRules(){
+  const keys=["kojin_online","kojin_akushu","zenkoku_online","real_meetgreet"];
+  const out={};
+  keys.forEach(k=>{
+    const cap=document.getElementById("tr_cap_"+k).value.trim();
+    const pr =document.getElementById("tr_pr_"+k).value.trim();
+    out[k]={ winCap: cap===""?null:+cap,
+             unitPrice: pr===""?null:+pr,
+             payment: document.getElementById("tr_pay_"+k).value };
+  });
+  SETTINGS.typeRules=out;
+  await saveSettings();
+  toast("種別の設定を保存しました");
+}
+
+/* =========================================================================
+   週次の申込サイクル
+   乃木坂の個別ミーグリは週単位で回る。木15:00に申込が開き、金14:00に締切、
+   金18:00以降に当落発表。翌週の木にまた開く ——「回次」はこの週の順番。
+   無敵券だけは別サイクルで、開催週の水曜に、その週の開催分に対してのみ
+   申し込める(時刻締切ではなく先着で、部が埋まると閉まる)。
+   AKBなど他グループはスケジュールが違うので mg_groups.config.cycle に持つ。
+   ========================================================================= */
+const DEFAULT_CYCLE={
+  lottery:{ open_dow:4, open_time:"15:00",     // 木 15:00 申込開始
+            close_dow:5, close_time:"14:00",   // 金 14:00 締切
+            result_dow:5, result_time:"18:00" },// 金 18:00 当落発表
+  comp:{ dow:3 }                                // 水 無敵券(その週の開催分・先着)
+};
+const DOW_LABEL=["日","月","火","水","木","金","土"];
+function cycleOf(gid){
+  const c=((byId(DB.groups,gid)||{}).config||{}).cycle||{};
+  return { lottery:Object.assign({},DEFAULT_CYCLE.lottery,c.lottery||{}),
+           comp:   Object.assign({},DEFAULT_CYCLE.comp,   c.comp||{}) };
+}
+// 指定の曜日・時刻の「次の」日時。その時刻を既に過ぎていれば来週になる。
+function nextDow(dow,hm,from){
+  const [h,m]=String(hm||"00:00").split(":").map(Number);
+  const t=new Date(from); t.setHours(h,m,0,0);
+  t.setDate(t.getDate()+((dow-from.getDay()+7)%7));
+  if(t<=from) t.setDate(t.getDate()+7);
+  return t;
+}
+// 月曜起点の週の頭
+function weekStart(d){
+  const x=new Date(d); x.setHours(0,0,0,0);
+  x.setDate(x.getDate()-((x.getDay()+6)%7)); return x;
+}
+const sameDay=(a,b)=>a.getFullYear()===b.getFullYear()&&a.getMonth()===b.getMonth()&&a.getDate()===b.getDate();
+
+/* 申込フェーズの判定。
+   「次の締切」が「次の開始」より近ければ、いまは受付中ということ。
+   同様に「次の発表」が「次の開始」より近ければ、締切後〜発表待ち。 */
+function lotteryPhase(L,now){
+  const open=nextDow(L.open_dow,L.open_time,now);
+  const close=nextDow(L.close_dow,L.close_time,now);
+  const result=nextDow(L.result_dow,L.result_time,now);
+  if(close<open)  return {key:"open",   at:close,  title:"通常申込 締切", cls:"close"};
+  if(result<open) return {key:"result", at:result, title:"当落発表",      cls:"info"};
+  return               {key:"wait",   at:open,   title:"通常申込 開始", cls:"open"};
+}
+function untilStr(ms){
+  if(ms<=0) return "まもなく";
+  const s=Math.floor(ms/1000), d=Math.floor(s/86400),
+        h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60), sec=s%60;
+  if(d>0) return `${d}日 ${h}時間`;
+  if(h>0) return `${h}時間 ${pad(m)}分`;
+  return `${m}分 ${pad(sec)}秒`;
+}
+
+/* カード描画に必要な文脈。直近の開催が無ければ null(カードごと出さない)。 */
+function weeklyCtx(){
+  const now=new Date();
+  const ymd=`${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
+  const up=DB.events.filter(e=>e.event_date>=ymd).sort((a,b)=>a.event_date>b.event_date?1:-1);
+  if(!up.length) return null;
+  const rel=byId(DB.releases,up[0].release_id);
+  const gid=rel?rel.group_id:null;
+  const cyc=cycleOf(gid);
+  // 今週(月〜日)の開催 = 無敵券の対象
+  const ws=weekStart(now), we=new Date(ws); we.setDate(ws.getDate()+7);
+  const thisWeek=up.filter(e=>{const d=new Date(e.event_date+"T00:00:00");return d>=ws&&d<we;});
+  const wed=new Date(ws); wed.setDate(ws.getDate()+((cyc.comp.dow+6)%7));
+  // 残高のある(=使える)メンバー
+  const compMem=DB.members.filter(m=>!m.is_graduated&&compBalance(m.id)>0);
+  // そのリリースでまだ完売していないメンバー
+  const relMems=rel?membersInRelease(rel.id):[];
+  const stillOpen=relMems.filter(mid=>!isSoldOut(rel.id,mid));
+  return {now,rel,gid,cyc,thisWeek,wed,compMem,relMems,stillOpen};
+}
+
+function weeklyCardHtml(){
+  if(!weeklyCtx()) return "";
+  return `<div class="card"><div class="row" style="margin-bottom:4px">
+      <h3 style="margin:0">今週の申込</h3>
+      <span class="dim" id="wkHead" style="margin-left:auto;font-size:11px"></span>
+    </div><div id="wkList"></div></div>`;
+}
+
+let weeklyTimer=null;
+function startWeekly(){
+  if(weeklyTimer) clearInterval(weeklyTimer);
+  tickWeekly(); weeklyTimer=setInterval(tickWeekly,1000);
+}
+function tickWeekly(){
+  const box=document.getElementById("wkList");
+  if(!box){ if(weeklyTimer) clearInterval(weeklyTimer); weeklyTimer=null; return; }
+  const c=weeklyCtx(); if(!c){ box.innerHTML=""; return; }
+  const now=new Date(), L=c.cyc.lottery;
+  const head=document.getElementById("wkHead");
+  if(head) head.textContent=[(byId(DB.groups,c.gid)||{}).name, c.rel&&c.rel.label].filter(Boolean).join(" ・ ");
+
+  let h="";
+
+  // --- 無敵券: 開催週の水曜・その週の開催分のみ・先着 ---
+  // 残高が無い/今週に開催が無い ときは出さない(毎週出ると意味が薄れるため)
+  if(c.compMem.length && c.thisWeek.length){
+    const today0=new Date(now); today0.setHours(0,0,0,0);
+    const isToday=sameDay(c.wed,now), past=c.wed<today0;
+    const names=c.compMem.map(m=>`${m.name} 残${compBalance(m.id)}枚`).join(" / ");
+    const tgt=c.thisWeek.map(e=>{const x=mdw(e.event_date);return `${x.md}(${x.wd})`;}).join(" ");
+    h+=`<div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+      <div class="grow">
+        <div style="font-weight:600">${DOW_LABEL[c.cyc.comp.dow]} 無敵券 申込
+          <span class="pill close" style="margin-left:5px;font-size:10px">先着</span></div>
+        <div class="dim" style="font-size:12px">${esc(names)} → ${esc(tgt)} の開催分</div>
+      </div>
+      <div class="pill ${isToday?"close":past?"info":"gold"}" style="font-size:13px;padding:5px 11px">
+        ${isToday?"本日":past?"受付終了":"あと "+Math.ceil((c.wed-today0)/86400000)+"日"}</div>
+    </div>`;
+  }
+
+  // --- 通常申込(抽選) ---
+  if(c.relMems.length && !c.stillOpen.length){
+    h+=`<div class="row" style="padding:10px 0">
+      <div class="grow"><div style="font-weight:600" class="dim">通常申込</div>
+        <div class="dim" style="font-size:12px">${esc(c.rel.label)} は対象メンバーが完売済み</div></div>
+      <div class="pill info" style="font-size:13px;padding:5px 11px">完売</div></div>`;
+  }else{
+    const ph=lotteryPhase(L,now);
+    const sub = ph.key==="open"   ? `${DOW_LABEL[L.close_dow]} ${L.close_time} まで受付中`
+              : ph.key==="result" ? `${DOW_LABEL[L.result_dow]} ${L.result_time} 発表 → 記録を入力`
+              : `${DOW_LABEL[L.open_dow]} ${L.open_time} 開始 → ${DOW_LABEL[L.close_dow]} ${L.close_time} 締切`;
+    h+=`<div class="row" style="padding:10px 0">
+      <div class="grow">
+        <div style="font-weight:600">${esc(ph.title)}</div>
+        <div class="dim" style="font-size:12px">${esc(sub)}</div>
+      </div>
+      <div class="pill ${ph.cls}" style="font-size:13px;padding:5px 11px;font-variant-numeric:tabular-nums">
+        あと ${untilStr(ph.at-now)}</div>
+    </div>`;
+  }
+  box.innerHTML=h;
+}
+
+/* ---------- 申込サイクルの設定(データ編集内) ---------- */
+function cycleEditorHtml(gid){
+  const c=cycleOf(gid), L=c.lottery;
+  const dsel=(id,v)=>`<select id="${id}" style="padding:6px 8px;font-size:13px">
+    ${DOW_LABEL.map((w,i)=>`<option value="${i}" ${i===+v?"selected":""}>${w}</option>`).join("")}</select>`;
+  const tin=(id,v)=>`<input type="time" id="${id}" value="${v}" style="padding:6px 8px;font-size:13px">`;
+  return `<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">
+    <div class="dim" style="font-size:11px;margin-bottom:6px">申込サイクル(週次)</div>
+    <div class="row" style="gap:5px;padding:3px 0;font-size:12px">
+      <span style="width:52px">開始</span>${dsel("cy_od_"+gid,L.open_dow)}${tin("cy_ot_"+gid,L.open_time)}</div>
+    <div class="row" style="gap:5px;padding:3px 0;font-size:12px">
+      <span style="width:52px">締切</span>${dsel("cy_cd_"+gid,L.close_dow)}${tin("cy_ct_"+gid,L.close_time)}</div>
+    <div class="row" style="gap:5px;padding:3px 0;font-size:12px">
+      <span style="width:52px">発表</span>${dsel("cy_rd_"+gid,L.result_dow)}${tin("cy_rt_"+gid,L.result_time)}</div>
+    <div class="row" style="gap:5px;padding:3px 0;font-size:12px">
+      <span style="width:52px">無敵券</span>${dsel("cy_wd_"+gid,c.comp.dow)}
+      <span class="dim" style="font-size:11px">開催週のみ・先着</span></div>
+    <button class="btn sm ghost" style="margin-top:6px" onclick="saveCycle('${gid}')">サイクルを保存</button>
+  </div>`;
+}
+async function saveCycle(gid){
+  const g=byId(DB.groups,gid); if(!g) return;
+  const v=id=>(document.getElementById(id)||{}).value;
+  const cfg=Object.assign({},g.config||{},{cycle:{
+    lottery:{ open_dow:+v("cy_od_"+gid), open_time:v("cy_ot_"+gid),
+              close_dow:+v("cy_cd_"+gid), close_time:v("cy_ct_"+gid),
+              result_dow:+v("cy_rd_"+gid), result_time:v("cy_rt_"+gid) },
+    comp:{ dow:+v("cy_wd_"+gid) }
+  }});
+  g.config=cfg; await dbUpdate("groups",gid,{config:cfg});
+  toast("申込サイクルを保存しました");
+}
+
+/* =========================================================================
+   無敵券の発行台帳 UI
+   メンバーが欠席したときに発行され、そのメンバーにだけ使える。
+   有効期限は実質なし(卒業まで)。残高 = 発行合計 − 使用合計。
+   ========================================================================= */
+function compCardHtml(){
+  const rows=membersWithComp();
+  let h=`<div class="card"><div class="row" style="margin-bottom:10px">
+    <h3 style="margin:0">無敵券</h3>
+    <button class="btn sm ghost" style="margin-left:auto" onclick="openCompIssue()">＋ 発行を登録</button>
+  </div>`;
+  if(!rows.length){
+    h+=`<div class="dim" style="font-size:12px">記録はありません。メンバーが欠席して振替券が出たら、ここに登録しておくと残高が追えます。</div>`;
+  }else{
+    h+=rows.map(m=>{
+      const bal=compBalance(m.id);
+      return `<div class="row" style="padding:8px 0;border-bottom:1px solid var(--line);cursor:pointer"
+                   onclick="openCompList('${m.id}')">
+        <span class="grow" style="font-weight:600">${esc(m.name)}${m.is_oshi?" ★":""}</span>
+        <span class="dim" style="font-size:11px;margin-right:10px">発行 ${compIssued(m.id)} / 使用 ${compUsed(m.id)}</span>
+        <span class="pill ${bal>0?"gold":"info"}">残 ${bal}枚</span>
+      </div>`;
+    }).join("");
+    h+=`<p class="dim" style="font-size:11px;margin:10px 0 0">無敵券は抽選を経ないため、当選率と個握券の費用には含めません。開催週の水曜に、その週の開催分だけ申込できます(先着)。</p>`;
+  }
+  return h+`</div>`;
+}
+
+// 発行の登録。欠席が出た開催日を紐づけておくと後から辿れる。
+function openCompIssue(mid){
+  const mems=DB.members.filter(m=>!m.is_graduated);
+  if(!mems.length){ toast("メンバーがいません"); return; }
+  const sel=mid||(mems.find(m=>m.is_oshi)||mems[0]).id;
+  const evs=DB.events.slice().sort((a,b)=>a.event_date<b.event_date?1:-1).slice(0,40);
+  const todayYmd=new Date().toISOString().slice(0,10);
+  openModal("無敵券の発行を登録",`
+    <div class="field"><label class="fld">メンバー</label>
+      <select id="ct_mem">${mems.map(m=>`<option value="${m.id}" ${m.id===sel?"selected":""}>${esc(m.name)}${m.is_oshi?" ★":""}</option>`).join("")}</select></div>
+    <div class="grid2">
+      <div class="field"><label class="fld">枚数</label>
+        <input type="number" id="ct_qty" min="1" value="1"></div>
+      <div class="field"><label class="fld">発行日</label>${dateField("ct_date",todayYmd,"発行日を選択")}</div>
+    </div>
+    <div class="field"><label class="fld">欠席が出た開催日(任意)</label>
+      <select id="ct_src"><option value="">指定しない</option>
+        ${evs.map(e=>`<option value="${e.id}">${esc(e.event_date)} ${esc(typeLabel(e.event_type))}</option>`).join("")}</select></div>
+    <div class="field" style="margin-bottom:0"><label class="fld">メモ(任意)</label>
+      <input type="text" id="ct_note" placeholder="体調不良で欠席 など"></div>
+  `,async()=>{
+    const qty=parseInt($("#ct_qty").value,10);
+    if(!(qty>0)){ toast("枚数を入力してください"); return false; }
+    const row=await dbInsert("comp_tickets",{
+      member_id:$("#ct_mem").value, qty,
+      issued_date:$("#ct_date").value||null,
+      source_event_id:$("#ct_src").value||null,
+      note:$("#ct_note").value.trim()||null
+    });
+    DB.comp_tickets.push(row);
+    toast(`無敵券 ${qty}枚 を登録しました`);
+    return true;
+  });
+}
+
+// そのメンバーの発行履歴。使用分は応募行(kind='comp')側にあるので、ここは発行だけ。
+function openCompList(mid){
+  const m=byId(DB.members,mid); if(!m) return;
+  const list=DB.comp_tickets.filter(t=>t.member_id===mid)
+    .sort((a,b)=>String(b.issued_date||"")>String(a.issued_date||"")?1:-1);
+  const used=[];
+  DB.applications.filter(a=>isComp(a)&&a.member_id===mid&&(a.won||0)>0).forEach(a=>{
+    const s=byId(DB.sessions,a.session_id), ev=s?byId(DB.events,s.event_id):null;
+    if(ev) used.push({date:ev.event_date,bu:s.bu_no,won:a.won});
+  });
+  used.sort((a,b)=>a.date<b.date?1:-1);
+  openModal(`無敵券 ・ ${m.name}`,`
+    <div class="row" style="margin-bottom:12px">
+      <span class="dim" style="font-size:12px">発行 ${compIssued(mid)} / 使用 ${compUsed(mid)}</span>
+      <span class="pill gold" style="margin-left:auto">残 ${compBalance(mid)}枚</span>
+    </div>
+    <div class="dim" style="font-size:11px;margin-bottom:4px">発行</div>
+    ${list.length?list.map(t=>`<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line)">
+        <span style="width:96px;font-size:12px">${esc(t.issued_date||"日付なし")}</span>
+        <span class="grow dim" style="font-size:12px">${esc(t.note||(t.source_event_id?("← "+(byId(DB.events,t.source_event_id)||{}).event_date):"")||"")}</span>
+        <span style="font-weight:700;color:var(--acc)">+${t.qty}</span>
+        <button class="btn sm ghost danger" style="padding:3px 7px;margin-left:8px" onclick="delCompTicket('${t.id}')">×</button>
+      </div>`).join(""):`<div class="dim" style="font-size:13px;padding:4px 0">発行の記録がありません</div>`}
+    <div class="dim" style="font-size:11px;margin:14px 0 4px">使用</div>
+    ${used.length?used.map(u=>`<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line)">
+        <span style="width:96px;font-size:12px">${esc(u.date)}</span>
+        <span class="grow dim" style="font-size:12px">${u.bu}部</span>
+        <span style="font-weight:700">-${u.won}</span>
+      </div>`).join(""):`<div class="dim" style="font-size:13px;padding:4px 0">使用の記録がありません</div>`}
+    <button class="btn ghost" style="width:100%;margin-top:16px" onclick="closeModals();openCompIssue('${mid}')">＋ 発行を登録</button>
+  `,async()=>true);
+  ["mOk","mCancel"].forEach(id=>{ const b=document.getElementById(id); if(b) b.style.display="none"; });
+}
+
+async function delCompTicket(id){
+  const t=byId(DB.comp_tickets,id); if(!t) return;
+  if(!confirm(`無敵券の発行記録(${t.qty}枚)を削除します。よろしいですか?`)) return;
+  DB.comp_tickets=DB.comp_tickets.filter(x=>x.id!==id);
+  await dbDelete("comp_tickets",id);
+  closeModals(); toast("削除しました"); renderHome();
+}
+
+/* =========================================================================
+   TAB: 一覧 (リリース・グリッド)  ★閲覧専用
+   行=部 / 列=開催日 のマトリクス。10年運用してきたスプレッドシートの
+   「開催日シート」(行=部 / 列=メンバー)を、列を開催日に置き換えた形。
+   1リリース分の保有枚数が1画面に収まる。
+   数値の編集はここでは行わない(誤操作防止)。編集は「記録」タブ。
+   ========================================================================= */
+let gridReleaseId=null, gridMemberId=null, gridMode="hold";   // hold=保有 / score=成績
+
+// 部番号の固定色(スプレッドシートの 1赤 2橙 3黄 4緑 5青 を踏襲)
+const BU_COLORS=["#e2585a","#e08a3b","#d3bb3c","#4fb286","#5b8fd4","#a07ad0","#5ac8c8","#c98fa8"];
+const buColor=n=>BU_COLORS[(n-1)%BU_COLORS.length];
+const WD=["日","月","火","水","木","金","土"];
+function mdw(ymd){
+  const d=new Date(ymd+"T00:00:00"), g=d.getDay();
+  return {md:`${d.getMonth()+1}/${d.getDate()}`, wd:WD[g],
+          cls:g===0?"wd sun":g===6?"wd sat":"wd"};     // 日=赤 / 土=青
+}
+function closeModals(){ document.querySelectorAll(".modalwrap").forEach(w=>w.remove()); }
+
+// そのリリースに応募記録があるメンバーID一覧
+function membersInRelease(rid){
+  const set=new Set();
+  eventsOf(rid).forEach(e=>membersInEvent(e.id).forEach(id=>set.add(id)));
+  return [...set];
+}
+
+/* リリース × メンバー のグリッド用データ。
+   cell["<event_id>:<bu_no>"] = {won, applied, rounds:[...], sess, ev} */
+function gridData(rid, mid){
+  const evs=eventsOf(rid);
+  const buSet=new Set(), times={}, cell={};
+  evs.forEach(e=>{
+    sessionsOf(e.id).forEach(s=>{
+      buSet.add(s.bu_no);
+      const t=s.start_time.slice(0,5);
+      (times[s.bu_no]=times[s.bu_no]||{})[t]=(times[s.bu_no][t]||0)+1;
+      const apps=DB.applications
+        .filter(a=>a.session_id===s.id && (!mid || a.member_id===mid))
+        .sort((a,b)=>a.round-b.round);
+      if(!apps.length) return;
+      const c=cell[e.id+":"+s.bu_no]={won:0,applied:0,comp:0,rounds:[],sess:s,ev:e};
+      apps.forEach(a=>{
+        c.won+=a.won||0; c.applied+=a.applied||0;
+        if(isComp(a)) c.comp+=a.won||0;          // 無敵券分は内訳として別に持つ
+        c.rounds.push({round:a.round,applied:a.applied||0,won:a.won||0,kind:a.kind||"lottery"});
+      });
+    });
+  });
+  const bus=[...buSet].sort((a,b)=>a-b);
+  // 各部の代表時刻(最も多く使われている開始時刻)。開催日ごとに時刻が違っても1行で表せる。
+  const repTime=bu=>{
+    const t=Object.entries(times[bu]||{});
+    return t.length ? t.sort((a,b)=>b[1]-a[1])[0][0] : "";
+  };
+  return {evs,bus,cell,repTime};
+}
+
+function renderGrid(){
+  const el=$("#tab-grid");
+  const rels=DB.releases.slice().sort((a,b)=>(b.release_date||"")>(a.release_date||"")?1:-1);
+  if(!rels.length){
+    el.innerHTML=`<h2 style="font-size:19px;margin:6px 0 12px">一覧</h2>
+      <div class="card"><div class="empty"><span class="big">\u{1F4BF}</span>
+      まだリリースがありません。<br>「記録」タブから追加してください。</div></div>`;
+    return;
+  }
+  if(!gridReleaseId || !byId(DB.releases,gridReleaseId)) gridReleaseId=rels[0].id;
+  const rel=byId(DB.releases,gridReleaseId);
+  const mems=membersInRelease(gridReleaseId);
+  if(!gridMemberId || !mems.includes(gridMemberId)){
+    gridMemberId = mems.find(id=>byId(DB.members,id)?.is_oshi) || mems[0] || null;
+  }
+
+  let h=`<div class="row" style="margin:6px 0 12px">
+    <h2 style="font-size:19px">一覧</h2>
+    ${gridMemberId?`<span class="pill gold" style="margin-left:auto">${esc(memberName(gridMemberId))}</span>`:""}
+  </div>`;
+
+  // 選択UIはラベルなしの1行に。メンバーが複数いるリリースのときだけ2列。
+  const relSel=`<select onchange="gridReleaseId=this.value;gridMemberId=null;renderGrid()">
+      ${rels.map(r=>`<option value="${r.id}" ${r.id===gridReleaseId?"selected":""}>${esc(r.label)}</option>`).join("")}
+    </select>`;
+  const memSel=`<select onchange="gridMemberId=this.value;renderGrid()">
+      ${mems.map(id=>`<option value="${id}" ${id===gridMemberId?"selected":""}>${esc(memberName(id))}${byId(DB.members,id)?.is_oshi?" ★":""}</option>`).join("")}
+    </select>`;
+  h+= mems.length>1 ? `<div class="grid2" style="margin-bottom:12px">${relSel}${memSel}</div>`
+                    : `<div style="margin-bottom:12px">${relSel}</div>`;
+
+  h+=`<div class="segbar">
+    <button class="${gridMode==="hold"?"on":""}" onclick="gridMode='hold';renderGrid()">保有</button>
+    <button class="${gridMode==="score"?"on":""}" onclick="gridMode='score';renderGrid()">成績</button>
+  </div>`;
+
+  h += (gridMode==="score") ? gridScoreHtml(gridReleaseId,gridMemberId)
+                            : gridHoldHtml(gridReleaseId,gridMemberId);
+  el.innerHTML=h;
+}
+
+/* --- 保有モード: 行=部 / 列=開催日 のマトリクス --- */
+function gridHoldHtml(rid, mid){
+  const {evs,bus,cell,repTime}=gridData(rid,mid);
+  if(!evs.length) return `<div class="card"><div class="empty">このリリースにはまだ開催日がありません。</div></div>`;
+  if(!bus.length)  return `<div class="card"><div class="empty">部が登録されていません。</div></div>`;
+
+  const colTot={}, rowTot={}; let grand=0, grandComp=0;
+  bus.forEach(bu=>rowTot[bu]=0);
+  evs.forEach(e=>colTot[e.id]=0);
+  bus.forEach(bu=>evs.forEach(e=>{
+    const c=cell[e.id+":"+bu]; if(!c) return;
+    rowTot[bu]+=c.won; colTot[e.id]+=c.won; grand+=c.won; grandComp+=c.comp;
+  }));
+
+  let h=`<div class="card"><div class="gridwrap"><table class="mg">
+    <thead><tr><th class="stick"></th>`;
+  evs.forEach(e=>{
+    const {md,wd,cls}=mdw(e.event_date);
+    h+=`<th class="dt" onclick="openEvent('${e.id}')">${md}<span class="${cls}">${wd}</span></th>`;
+  });
+  h+=`<th class="tot">計</th></tr></thead><tbody>`;
+  bus.forEach(bu=>{
+    h+=`<tr><td class="stick"><span class="buchip" style="background:${buColor(bu)}"></span>${bu}部`
+      +`<span class="butime">${repTime(bu)}</span></td>`;
+    evs.forEach(e=>{
+      const c=cell[e.id+":"+bu];
+      h+= (c && c.won)
+        ? `<td class="cell has" onclick="gridCell('${e.id}',${bu})">${c.won}`
+          + (c.comp?`<span class="cdot" title="無敵券を含む"></span>`:"") + `</td>`
+        : `<td class="zero">・</td>`;
+    });
+    h+=`<td class="tot ${rowTot[bu]?"has":"zero"}">${rowTot[bu]||"・"}</td></tr>`;
+  });
+  h+=`<tr class="sum"><td class="stick">計</td>`;
+  evs.forEach(e=>h+=`<td>${colTot[e.id]||"・"}</td>`);
+  h+=`<td class="tot" style="color:var(--acc)">${grand}</td></tr>`;
+  h+=`</tbody></table></div>
+    <p class="dim" style="font-size:11px;margin:12px 0 0">数字は保有枚数。セルをタップで回次別の内訳、日付をタップで「記録」の詳細へ。このタブでは数値は変更されません。`
+    + (grandComp?`<br><span class="cdot" style="position:static;display:inline-block;margin-right:4px"></span>は無敵券を含むセル。総計 ${grand}枚のうち 無敵券 ${grandComp}枚。`:"")
+    + `</p></div>`;
+  return h;
+}
+
+/* --- セル詳細(回次別の内訳)。閲覧のみ --- */
+function gridCell(eid,bu){
+  const {cell}=gridData(gridReleaseId,gridMemberId);
+  const c=cell[eid+":"+bu]; if(!c) return;
+  const s=c.sess, e=c.ev;
+  const rows=c.rounds.map(r=>`<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line)">
+      <span style="width:62px;font-weight:600;${r.kind==="comp"?"color:var(--acc)":""}">${r.kind==="comp"?"無敵券":r.round+"次"}</span>
+      <span class="dim grow" style="font-size:12px">${r.kind==="comp"?"抽選なし":"申請 "+r.applied}</span>
+      <span style="font-weight:700">${r.kind==="comp"?"":"当選 "}${r.won}</span></div>`).join("");
+  openModal(`${formatDateDisp(e.event_date)}  ${bu}部`,`
+    <div class="row" style="gap:8px;margin-bottom:12px;flex-wrap:wrap">
+      <span class="pill ${typePillClass(e.event_type)}">${esc(typeLabel(e.event_type))}</span>
+      <span class="dim" style="font-size:12px">${s.start_time.slice(0,5)}–${s.end_time.slice(0,5)}</span>
+      <span class="pill close" style="margin-left:auto">締切 ${(s.receipt_close||"").slice(0,5)}</span>
+    </div>
+    <div class="dim" style="font-size:12px;margin-bottom:4px">${esc(memberName(gridMemberId))}</div>
+    ${rows||`<div class="dim" style="font-size:13px">記録なし</div>`}
+    <div class="row" style="padding:10px 0 0">
+      <span class="grow"></span>
+      <span style="font-weight:700;color:var(--acc)">合計 ${c.won}枚</span></div>
+    ${s.topic?`<p class="dim" style="font-size:12px;margin:10px 0 0">\u{1F4AC} ${esc(s.topic)}</p>`:""}
+    <button class="btn ghost" style="width:100%;margin-top:16px" onclick="closeModals();openEvent('${e.id}')">「記録」で編集する</button>
+  `, async()=>true);
+  // 閲覧専用モーダル。保存/キャンセルは不要なので「閉じる」だけ残す。
+  ["mOk","mCancel"].forEach(id=>{ const b=document.getElementById(id); if(b) b.style.display="none"; });
+}
+
+/* --- 成績モード: 回次ごとに 行=開催日 / 列=申請・当選・当選率 + 累計 --- */
+function gridScoreHtml(rid, mid){
+  const evs=eventsOf(rid);
+  if(!evs.length) return `<div class="card"><div class="empty">このリリースにはまだ開催日がありません。</div></div>`;
+  const roundSet=new Set(), m={};
+  evs.forEach(e=>sessionsOf(e.id).forEach(s=>{
+    DB.applications.filter(a=>a.session_id===s.id && (!mid||a.member_id===mid) && !isComp(a)).forEach(a=>{
+      roundSet.add(a.round);
+      const r=(m[a.round]=m[a.round]||{});
+      const c=(r[e.id]=r[e.id]||{applied:0,won:0});
+      c.applied+=a.applied||0; c.won+=a.won||0;
+    });
+  }));
+  const rs=[...roundSet].sort((a,b)=>a-b);
+  if(!rs.length) return `<div class="card"><div class="empty">このリリースの応募記録がありません。<br>「記録」タブで申請・当選を入力してください。</div></div>`;
+
+  const pct=(w,a)=>a?(Math.round(w/a*1000)/10)+"%":"—";
+  const col=(w,a)=>!a?"var(--txt3)":(w/a>=.5?"var(--ok)":w/a>=.3?"var(--warn)":"var(--danger)");
+  let h="", cumA=0, cumW=0;
+  rs.forEach((r,i)=>{
+    const per=m[r]||{};
+    let sa=0,sw=0;
+    h+=`<div class="card"><h3 style="color:var(--acc);text-transform:none;font-size:14px">${r}次</h3>
+      <div class="gridwrap"><table class="mg"><thead><tr>
+        <th class="stick">開催日</th><th>申請</th><th>当選</th><th class="tot">当選率</th>
+      </tr></thead><tbody>`;
+    evs.forEach(e=>{
+      const c=per[e.id]||{applied:0,won:0};
+      sa+=c.applied; sw+=c.won;
+      const {md,wd,cls}=mdw(e.event_date);
+      h+=`<tr><td class="stick">${md}<span class="butime ${cls}">${wd}</span></td>
+        <td class="${c.applied?"":"zero"}">${c.applied||"・"}</td>
+        <td class="${c.won?"has":"zero"}">${c.won||"・"}</td>
+        <td class="tot" style="color:${col(c.won,c.applied)};font-weight:600">${pct(c.won,c.applied)}</td></tr>`;
+    });
+    cumA+=sa; cumW+=sw;
+    h+=`<tr class="sum"><td class="stick">計</td><td>${sa}</td><td>${sw}</td>
+      <td class="tot" style="color:${col(sw,sa)}">${pct(sw,sa)}</td></tr>`;
+    if(i>0){
+      h+=`<tr class="sum"><td class="stick" style="font-size:11px">${rs.slice(0,i+1).map(x=>x+"次").join("+")}</td>
+        <td>${cumA}</td><td>${cumW}</td>
+        <td class="tot" style="color:${col(cumW,cumA)}">${pct(cumW,cumA)}</td></tr>`;
+    }
+    h+=`</tbody></table></div></div>`;
+  });
+  return h;
 }
 
 /* =========================================================================
@@ -1043,20 +1734,31 @@ function renderStats(){
   </div>`;
 
   // 集計: 対象メンバー × 種別 の「部」別
+  // 当選上限がある種別(全国/リアル)では、上限に届いた行から本当の当選率は読めない。
+  // 「20枚入れて10枚当選」は50%に見えるが、実際は100%を上限で切られただけかもしれない。
+  // そういう行(打ち止め)を分けて集計し、率は打ち止めでない行から出す。
+  const statCap=typeRule(statsType).winCap;
   const byBu={};
   DB.sessions.forEach(s=>{
     const ev=byId(DB.events,s.event_id); if(!ev) return;
     if(ev.event_type!==statsType) return;
-    DB.applications.filter(a=>a.session_id===s.id && a.member_id===statsMemberId).forEach(a=>{
-      (byBu[s.bu_no]=byBu[s.bu_no]||{applied:0,won:0,n:0,times:{}});
-      byBu[s.bu_no].applied+=a.applied||0; byBu[s.bu_no].won+=a.won||0; byBu[s.bu_no].n++;
-      const t=s.start_time.slice(0,5); byBu[s.bu_no].times[t]=(byBu[s.bu_no].times[t]||0)+1;
+    DB.applications.filter(a=>a.session_id===s.id && a.member_id===statsMemberId && !isComp(a)).forEach(a=>{
+      const v=(byBu[s.bu_no]=byBu[s.bu_no]||{applied:0,won:0,n:0,cap:0,uApplied:0,uWon:0,times:{}});
+      v.applied+=a.applied||0; v.won+=a.won||0; v.n++;
+      if(statCap!=null && (a.won||0)>=statCap) v.cap++;                       // 打ち止め
+      else { v.uApplied+=a.applied||0; v.uWon+=a.won||0; }                    // 率に使える行
+      const t=s.start_time.slice(0,5); v.times[t]=(v.times[t]||0)+1;
     });
   });
   // 各部の代表時刻(最も多く使われた開始時刻)
   const repTime=v=>{ const e=Object.entries(v.times); if(!e.length) return ""; return e.sort((a,b)=>b[1]-a[1])[0][0]; };
-  const rows=Object.entries(byBu).map(([bu,v])=>({bu:+bu,t:repTime(v),...v,rate:v.applied?v.won/v.applied:null}))
-    .filter(r=>r.applied>0).sort((a,b)=>a.bu-b.bu);
+  const rows=Object.entries(byBu).map(([bu,v])=>{
+    // 打ち止めの行しか無い部は、率ではなく下限(「これ以上」)しか言えない
+    const bound=v.uApplied===0 && v.cap>0;
+    const rate = v.uApplied ? v.uWon/v.uApplied : (v.applied? v.won/v.applied : null);
+    return {bu:+bu,t:repTime(v),...v,rate,bound};
+  }).filter(r=>r.applied>0 && r.rate!=null).sort((a,b)=>a.bu-b.bu);
+  const capHits=rows.reduce((n,r)=>n+r.cap,0);
 
   if(!rows.length){
     html+=`<div class="card"><div class="empty">この条件の応募データがありません。</div></div>`;
@@ -1065,7 +1767,7 @@ function renderStats(){
   const best=rows.reduce((a,b)=>(b.rate>a.rate?b:a));
   html+=`<div class="card" style="border-color:var(--acc-d)">
     <h3 style="color:var(--acc)">最も当たりやすい部</h3>
-    <div style="font-size:26px;font-weight:700">${best.bu}部 ${best.t?`<span style="font-size:15px;color:var(--txt2)">(${best.t})</span>`:""} <span style="font-size:16px;color:var(--ok)">${Math.round(best.rate*100)}%</span></div>
+    <div style="font-size:26px;font-weight:700">${best.bu}部 ${best.t?`<span style="font-size:15px;color:var(--txt2)">(${best.t})</span>`:""} <span style="font-size:16px;color:var(--ok)">${best.bound?"≥":""}${Math.round(best.rate*100)}%</span></div>
     <div class="dim" style="font-size:12px">${esc(memberName(statsMemberId))} の応募実績より。同じ応募枚数ならこの部が有利な傾向です。</div></div>`;
 
   const max=Math.max(...rows.map(r=>r.rate));
@@ -1076,30 +1778,37 @@ function renderStats(){
     html+=`<div style="margin:11px 0">
       <div class="row" style="font-size:13px;margin-bottom:4px">
         <span style="font-weight:600;width:74px">${r.bu}部 ${r.t?`<span class="dim" style="font-weight:400">${r.t}</span>`:""}</span>
-        <span class="dim grow" style="font-size:12px">当選${r.won}/申請${r.applied} ・ ${r.n}件</span>
-        <span style="font-weight:700;color:${col}">${pct}%</span></div>
+        <span class="dim grow" style="font-size:12px">当選${r.won}/申請${r.applied} ・ ${r.n}件${r.cap?` ・ <span style="color:var(--warn)">打ち止め${r.cap}件</span>`:""}</span>
+        <span style="font-weight:700;color:${col}">${r.bound?"≥":""}${pct}%</span></div>
       <div style="height:8px;background:var(--bg2);border-radius:6px;overflow:hidden">
         <div style="height:100%;width:${(r.rate/max*100).toFixed(0)}%;background:${col};border-radius:6px"></div></div>
     </div>`;
   });
+  if(capHits) html+=`<p class="dim" style="font-size:11px;margin:10px 0 0">この種別は1部あたり当選 ${statCap}枚 が上限です。上限に届いた回(打ち止め)は本当の当選率が読めないため、率の計算からは外しています。「≥」は下限しか出せない部です。</p>`;
   html+=`</div>`;
 
   // 回次別 当選率(対象メンバー)
   html+=`<div class="card"><h3>回次別 当選率 <span class="dim" style="font-weight:400;font-size:12px;text-transform:none">(${esc(memberName(statsMemberId))})</span></h3>`;
   const byRound={};
-  DB.applications.filter(a=>a.member_id===statsMemberId).forEach(a=>{
-    const ev=byId(DB.events, (byId(DB.sessions,a.session_id)||{}).event_id);
-    if(ev && ev.event_type!==statsType) return;
-    (byRound[a.round]=byRound[a.round]||{applied:0,won:0});byRound[a.round].applied+=a.applied||0;byRound[a.round].won+=a.won||0;
+  DB.applications.filter(a=>a.member_id===statsMemberId && !isComp(a)).forEach(a=>{
+    // 部未指定の行(過去データ移行分)は event_id 側から種別を引く
+    const s=byId(DB.sessions,a.session_id);
+    const ev=byId(DB.events, s?s.event_id:a.event_id);
+    if(!ev || ev.event_type!==statsType) return;
+    const v=(byRound[a.round]=byRound[a.round]||{applied:0,won:0,cap:0,uApplied:0,uWon:0});
+    v.applied+=a.applied||0; v.won+=a.won||0;
+    if(statCap!=null && (a.won||0)>=statCap) v.cap++;
+    else { v.uApplied+=a.applied||0; v.uWon+=a.won||0; }
   });
   const rr=Object.entries(byRound).filter(([k,v])=>v.applied>0).sort((a,b)=>a[0]-b[0]);
   if(!rr.length){ html+=`<div class="dim" style="font-size:13px">データなし</div>`; }
   else rr.forEach(([round,v])=>{
-    const pct=Math.round(v.won/v.applied*100);
+    const bound=v.uApplied===0 && v.cap>0;
+    const pct=Math.round((v.uApplied? v.uWon/v.uApplied : v.won/v.applied)*100);
     html+=`<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line)">
       <span style="font-weight:600;width:52px">${round}次</span>
-      <span class="dim grow" style="font-size:12px">当選${v.won}/申請${v.applied}</span>
-      <span style="font-weight:700">${pct}%</span></div>`;
+      <span class="dim grow" style="font-size:12px">当選${v.won}/申請${v.applied}${v.cap?` ・ <span style="color:var(--warn)">打ち止め${v.cap}件</span>`:""}</span>
+      <span style="font-weight:700">${bound?"≥":""}${pct}%</span></div>`;
   });
   html+=`</div>`;
   el.innerHTML=html;
@@ -1152,7 +1861,12 @@ function renderSim(){
       ${miniStat("期待当選","<span id='simExp'>0.0</span>枚")}
       ${miniStat("期待当選率","<span id='simRate'>—</span>")}
     </div>
-    <p class="dim" style="font-size:11px;margin:10px 0 0">当選率は選択メンバー・選択種別・選択回次の歴代実績(その部の実データ)のみで算出します。データの無い部は「データなし」と表示し、合計・期待当選の計算からは除外します。確率の目安です。</p>
+    <div class="row" id="simWasteBox" style="display:none;margin-top:12px;padding:10px 12px;background:var(--dangerbg);border-radius:10px">
+      <span style="font-size:12px;color:var(--danger)">上限を超えて入れた分</span>
+      <span class="grow"></span>
+      <span id="simWaste" style="font-weight:700;color:var(--danger)">—</span>
+    </div>
+    <p class="dim" style="font-size:11px;margin:10px 0 0" id="simNote">当選率は選択メンバー・選択種別・選択回次の歴代実績(その部の実データ)のみで算出します。データの無い部は「データなし」と表示し、合計・期待当選の計算からは除外します。確率の目安です。</p>
   </div>`;
   el.innerHTML=html;
   simBuild();
@@ -1161,6 +1875,8 @@ function simBuild(){
   const type=($("#simType")||{}).value||simType;
   const box=$("#simRows"); if(!box) return;
   if(!type){ box.innerHTML=`<div class="empty" style="padding:20px">このメンバーの所属グループにイベントがありません。</div>`; simCalc(); return; }
+  // 種別ごとの制度(当選上限・単価・支払いの向き)
+  const rule=typeRule(type), cap=rule.winCap;
 
   // 選択メンバー × 選択種別 × 選択回次 の「部」別当選率を集計(種別で完全に分離)
   // 各部の代表時刻も保持(カスタムは実データの時刻を使うため)。
@@ -1169,10 +1885,13 @@ function simBuild(){
     DB.sessions.forEach(s=>{
       const ev=byId(DB.events,s.event_id); if(!ev) return;
       if(ev.event_type!==type) return;                 // ★種別フィルタ(他種別を混ぜない)
-      DB.applications.filter(a=>a.session_id===s.id && a.member_id===simMemberId && a.round===simRound).forEach(a=>{
-        (byBu[s.bu_no]=byBu[s.bu_no]||{applied:0,won:0,times:{}});
-        byBu[s.bu_no].applied+=a.applied||0; byBu[s.bu_no].won+=a.won||0;
-        const t=s.start_time.slice(0,5); byBu[s.bu_no].times[t]=(byBu[s.bu_no].times[t]||0)+1;
+      DB.applications.filter(a=>a.session_id===s.id && a.member_id===simMemberId && a.round===simRound && !isComp(a)).forEach(a=>{
+        const v=(byBu[s.bu_no]=byBu[s.bu_no]||{applied:0,won:0,cap:0,uApplied:0,uWon:0,times:{}});
+        v.applied+=a.applied||0; v.won+=a.won||0;
+        // 当選率タブと同じ補正: 上限に届いた回は率の計算から外す
+        if(cap!=null && (a.won||0)>=cap) v.cap++;
+        else { v.uApplied+=a.applied||0; v.uWon+=a.won||0; }
+        const t=s.start_time.slice(0,5); v.times[t]=(v.times[t]||0)+1;
       });
     });
   }
@@ -1197,41 +1916,70 @@ function simBuild(){
     rowsSpec=buildSchedule(TEMPLATES[type]||TEMPLATES.kojin_online).map(s=>({bu_no:s.bu_no, k:s.start_time.slice(0,5)}));
   }
 
+  box.dataset.payment=rule.payment||"post";
+  box.dataset.unit=rule.unitPrice||0;
+  const wb=$("#simWasteBox"); if(wb) wb.style.display=(cap!=null&&rule.payment==="pre")?"":"none";
+  const note=$("#simNote");
+  if(note) note.textContent = cap!=null
+    ? `この種別は1部あたり当選 ${cap}枚 が上限です。上限に届くのに要る枚数を「目安」として出し、それを超えた分は当選に繋がりません`
+      + (rule.payment==="pre"?"(先払いなので、そのまま無駄になります)。":"。")
+      + " 当選率は選択メンバー・種別・回次の実績のみで算出します。"
+    : "当選率は選択メンバー・選択種別・選択回次の歴代実績(その部の実データ)のみで算出します。データの無い部は「データなし」と表示し、合計・期待当選の計算からは除外します。確率の目安です。";
+
   box.innerHTML=rowsSpec.map((s)=>{
     const k=s.k;
     const v=byBu[s.bu_no];
     const hasData = !!(v && v.applied);
-    const rate = hasData ? v.won/v.applied : null;
+    const rate = !hasData ? null : (v.uApplied ? v.uWon/v.uApplied : v.won/v.applied);
     if(!hasData){
-      return `<div class="row" style="padding:9px 0;border-bottom:1px solid var(--line);gap:10px;opacity:.65" data-nodata="1">
-        <div style="width:70px"><div style="font-weight:600">${s.bu_no}部</div><div class="dim" style="font-size:11px">${k}</div></div>
-        <input type="number" min="0" value="3" style="width:62px;text-align:center;padding:6px" disabled class="simInput">
-        <span style="font-size:12px;color:var(--txt3);width:104px">データなし</span>
-        <span class="grow" style="text-align:right;font-weight:700;color:var(--txt3)">期待 —</span>
-      </div>`;
+      return `<div class="simrow" style="border-bottom:1px solid var(--line);opacity:.65" data-nodata="1">
+        <div class="row" style="padding:9px 0;gap:10px">
+          <div style="width:70px"><div style="font-weight:600">${s.bu_no}部</div><div class="dim" style="font-size:11px">${k}</div></div>
+          <input type="number" min="0" value="3" style="width:62px;text-align:center;padding:6px" disabled class="simInput">
+          <span style="font-size:12px;color:var(--txt3);width:104px">データなし</span>
+          <span class="grow" style="text-align:right;font-weight:700;color:var(--txt3)">期待 —</span>
+        </div></div>`;
     }
     const col=rate>=.5?'var(--ok)':rate>=.3?'var(--warn)':'var(--danger)';
-    return `<div class="row" style="padding:9px 0;border-bottom:1px solid var(--line);gap:10px" data-rate="${rate}">
-      <div style="width:70px"><div style="font-weight:600">${s.bu_no}部</div><div class="dim" style="font-size:11px">${k}</div></div>
-      <input type="number" min="0" value="3" style="width:62px;text-align:center;padding:6px" oninput="simCalc()" class="simInput">
-      <span style="font-size:12px;color:${col};width:104px">当選率 ${Math.round(rate*100)}%</span>
-      <span class="grow" style="text-align:right;font-weight:700">期待 <span class="expCell">0.0</span></span>
+    const need=needForCap(rate,cap);
+    return `<div class="simrow" style="border-bottom:1px solid var(--line)"
+                 data-rate="${rate}" data-cap="${cap??""}" data-need="${need??""}">
+      <div class="row" style="padding:9px 0 ${need!=null?"2px":"9px"};gap:10px">
+        <div style="width:70px"><div style="font-weight:600">${s.bu_no}部</div><div class="dim" style="font-size:11px">${k}</div></div>
+        <input type="number" min="0" value="3" style="width:62px;text-align:center;padding:6px" oninput="simCalc()" class="simInput">
+        <span style="font-size:12px;color:${col};width:104px">当選率 ${Math.round(rate*100)}%</span>
+        <span class="grow" style="text-align:right;font-weight:700">期待 <span class="expCell">0.0</span></span>
+      </div>
+      ${need!=null?`<div class="hint dim" style="font-size:11px;padding:0 0 8px 80px"></div>`:""}
     </div>`;
   }).join("");
   simCalc();
 }
 function simCalc(){
-  const rows=document.querySelectorAll("#simRows .row");
-  let totA=0,totE=0;
-  rows.forEach(r=>{
+  const box=$("#simRows"); if(!box) return;
+  const pay=box.dataset.payment, unit=+box.dataset.unit||0;
+  let totA=0,totE=0,totOver=0;
+  box.querySelectorAll(".simrow").forEach(r=>{
     if(r.dataset.nodata) return;                  // データなしの部は合計に含めない
-    const rate=+r.dataset.rate; const v=+r.querySelector(".simInput").value||0;
-    const e=v*rate; totA+=v; totE+=e;
+    const rate=+r.dataset.rate;
+    const cap =r.dataset.cap ==="" ? null : +r.dataset.cap;
+    const need=r.dataset.need==="" ? null : +r.dataset.need;
+    const v=+r.querySelector(".simInput").value||0;
+    let e=v*rate;
+    if(cap!=null) e=Math.min(e,cap);              // 制度上ありえない期待値を出さない
+    totA+=v; totE+=e;
     r.querySelector(".expCell").textContent=e.toFixed(1);
+    const over=(need!=null && v>need) ? v-need : 0;
+    totOver+=over;
+    const hint=r.querySelector(".hint");
+    if(hint&&need!=null) hint.innerHTML=`上限 ${cap}枚 ・ 目安 ${need}枚で到達`
+      + (over?` ・ <span style="color:var(--danger);font-weight:600">過剰 ${over}枚</span>`:"");
   });
   $("#simApp").textContent=totA;
   $("#simExp").textContent=totE.toFixed(1);
   $("#simRate").textContent=totA?Math.round(totE/totA*100)+"%":"—";
+  const w=$("#simWaste");
+  if(w) w.textContent = totOver ? (pay==="pre"&&unit ? `${totOver}枚 ・ ${yen(totOver*unit)}` : `${totOver}枚`) : "なし";
 }
 
 /* =========================================================================
@@ -1239,6 +1987,7 @@ function simCalc(){
    ========================================================================= */
 function openModal(title,bodyHtml,onOk){
   const wrap=document.createElement("div");
+  wrap.className="modalwrap";
   wrap.style.cssText="position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.6);display:flex;align-items:flex-end;justify-content:center;padding:0";
   wrap.innerHTML=`<div style="background:var(--card);border:1px solid var(--line2);border-radius:18px 18px 0 0;width:100%;max-width:560px;max-height:88vh;overflow:auto;padding:18px 18px calc(20px + env(safe-area-inset-bottom))">
     <div class="row" style="margin-bottom:14px"><h2 style="font-size:17px">${esc(title)}</h2>
@@ -1274,6 +2023,7 @@ function dataEditorBody(){
     return `<div class="empty">グループがありません。「記録」からリリースを追加すると作成されます。</div>`;
   }
   let h=`<p class="dim" style="font-size:11px;margin:0 0 12px">グループ名・メンバー名の修正、オシ(★)指定、不要なデータの削除ができます。削除は元に戻せません。</p>`;
+  h+=typeRulesEditorHtml();
   groups.forEach(g=>{
     const mem=membersOfGroup(g.id);
     const relCount=DB.releases.filter(r=>r.group_id===g.id).length;
@@ -1315,6 +2065,7 @@ function dataEditorBody(){
     }
     h+=`<button class="btn sm ghost" style="margin-top:6px" onclick="editCustomType('${g.id}',null)">＋ カスタム種別を追加</button>
       </div>`;
+    h+=cycleEditorHtml(g.id);
     h+=`</div>`;
   });
   return h;
