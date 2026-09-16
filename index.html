@@ -1375,15 +1375,16 @@ function openCompIssue(mid){
   const todayYmd=new Date().toISOString().slice(0,10);
   openModal("無敵券の発行を登録",`
     <div class="field"><label class="fld">メンバー</label>
-      <select id="ct_mem">${mems.map(m=>`<option value="${m.id}" ${m.id===sel?"selected":""}>${esc(m.name)}${m.is_oshi?" ★":""}</option>`).join("")}</select></div>
+      <select id="ct_mem" onchange="compAutofill()">${mems.map(m=>`<option value="${m.id}" ${m.id===sel?"selected":""}>${esc(m.name)}${m.is_oshi?" ★":""}</option>`).join("")}</select></div>
+    <div class="field"><label class="fld">欠席が出た開催日</label>
+      <select id="ct_src" onchange="compAutofill()"><option value="">指定しない</option>
+        ${evs.map(e=>`<option value="${e.id}">${esc(e.event_date)} ${esc(typeLabel(e.event_type))}</option>`).join("")}</select>
+      <p class="dim" style="font-size:11px;margin:5px 0 0">選ぶと、その日そのメンバーで当選していた枚数と日付を下に自動で入れます。</p></div>
     <div class="grid2">
       <div class="field"><label class="fld">枚数</label>
         <input type="number" id="ct_qty" min="1" value="1"></div>
       <div class="field"><label class="fld">発行日</label>${dateField("ct_date",todayYmd,"発行日を選択")}</div>
     </div>
-    <div class="field"><label class="fld">欠席が出た開催日(任意)</label>
-      <select id="ct_src"><option value="">指定しない</option>
-        ${evs.map(e=>`<option value="${e.id}">${esc(e.event_date)} ${esc(typeLabel(e.event_type))}</option>`).join("")}</select></div>
     <div class="field" style="margin-bottom:0"><label class="fld">メモ(任意)</label>
       <input type="text" id="ct_note" placeholder="体調不良で欠席 など"></div>
   `,async()=>{
@@ -1399,6 +1400,22 @@ function openCompIssue(mid){
     toast(`無敵券 ${qty}枚 を登録しました`);
     return true;
   });
+}
+
+/* 欠席が出た開催日を選んだら、枚数と発行日を埋める。
+   メンバーが欠席すると、その日そのメンバーで当選していた分がそのまま
+   振替になるので、枚数は普通その日の当選枚数と一致する。 */
+function compAutofill(){
+  const mid=($("#ct_mem")||{}).value, eid=($("#ct_src")||{}).value;
+  if(!mid||!eid) return;
+  const ev=byId(DB.events,eid); if(!ev) return;
+  let n=0;
+  sessionsOf(eid).forEach(s=>DB.applications
+    .filter(a=>a.session_id===s.id && a.member_id===mid && !isComp(a))
+    .forEach(a=>n+=a.won||0));
+  if(n>0){ const q=$("#ct_qty"); if(q) q.value=n; }
+  const d=$("#ct_date");
+  if(d){ d.value=ev.event_date; syncDateDisp("ct_date","発行日を選択"); }
 }
 
 // そのメンバーの発行履歴。使用分は応募行(kind='comp')側にあるので、ここは発行だけ。
