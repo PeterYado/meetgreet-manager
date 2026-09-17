@@ -167,6 +167,7 @@
   table.mg td.abs{color:var(--txt3);text-decoration:line-through;text-decoration-color:var(--warn)}
   table.mg td.abs::after{content:"欠";position:absolute;top:1px;right:2px;font-size:8px;
     color:var(--warn);text-decoration:none;letter-spacing:0}
+  .prevq{position:absolute;top:1px;right:2px;font-size:9px;color:var(--txt3);font-weight:400}
   .cdot{position:absolute;top:3px;right:3px;width:5px;height:5px;border-radius:50%;
     background:var(--acc);box-shadow:0 0 4px rgba(201,168,74,.8)}
   table.mg td.cell:active{background:var(--card2)}
@@ -178,7 +179,7 @@
   .segbar{display:flex;gap:6px;background:var(--bg2);border:1px solid var(--line2);
     border-radius:var(--r2);padding:3px;margin-bottom:12px}
   .segbar button{flex:1;background:none;border:none;color:var(--txt2);font-size:13px;
-    padding:7px 4px;border-radius:7px;transition:.15s}
+    padding:7px 2px;border-radius:7px;transition:.15s;white-space:nowrap}
   .segbar button.on{background:var(--card2);color:var(--txt);font-weight:600}
 </style>
 </head>
@@ -276,7 +277,7 @@ function typePillClass(type){
 /* ---------- グローバル状態 ---------- */
 let sb=null, USER=null;
 const DB={ groups:[],members:[],releases:[],events:[],sessions:[],applications:[],
-           comp_tickets:[],release_members:[],absences:[] };
+           comp_tickets:[],release_members:[],absences:[],plans:[] };
 let SETTINGS={ yearGoal:0, customTypes:[], typeRules:{} };  // customTypes: ユーザー定義の種別テンプレ / typeRules: 種別ごとの上限・単価
 let activeTab="home";
 let selectedReleaseId=null, selectedEventId=null;
@@ -303,7 +304,7 @@ const tbl=name=>TBL_PREFIX+name;
 async function loadAll(){
   setSync("saving","読込中…");
   const tables=["groups","members","releases","events","sessions","applications",
-                "comp_tickets","release_members","absences"];
+                "comp_tickets","release_members","absences","plans"];
   for(const t of tables){
     const {data,error}=await sb.from(tbl(t)).select("*");
     if(error){ console.error(t,error); setSync("err"); toast("読込失敗: "+t); return false; }
@@ -516,14 +517,12 @@ function renderShell(){
     <section class="tab" id="tab-grid"></section>
     <section class="tab" id="tab-events"></section>
     <section class="tab" id="tab-stats"></section>
-    <section class="tab" id="tab-sim"></section>
   </div></main>
   <nav class="bottomnav">
     ${navBtn("home","今日","\u23F0")}
     ${navBtn("grid","一覧","\u{1F3AB}")}
     ${navBtn("events","記録","\u{1F4CB}")}
     ${navBtn("stats","当選率","\u{1F4CA}")}
-    ${navBtn("sim","応募計算","\u{1F3AF}")}
   </nav>`;
   switchTab(activeTab);
 }
@@ -535,7 +534,7 @@ function switchTab(id){
   activeTab=id;
   document.querySelectorAll(".tab").forEach(s=>s.classList.toggle("active",s.id==="tab-"+id));
   document.querySelectorAll(".bottomnav button").forEach(b=>b.classList.toggle("active",b.dataset.tab===id));
-  ({home:renderHome,grid:renderGrid,events:renderEvents,stats:renderStats,sim:renderSim}[id])();
+  ({home:renderHome,grid:renderGrid,events:renderEvents,stats:renderStats}[id])();
 }
 
 /* =========================================================================
@@ -1556,10 +1555,12 @@ function renderGrid(){
     <button class="${gridMode==="hold"?"on":""}" onclick="gridMode='hold';renderGrid()">保有</button>
     <button class="${gridMode==="score"?"on":""}" onclick="gridMode='score';renderGrid()">成績</button>
     <button class="${gridMode==="cost"?"on":""}" onclick="gridMode='cost';renderGrid()">費用</button>
+    <button class="${gridMode==="plan"?"on":""}" onclick="gridMode='plan';renderGrid()">応募</button>
   </div>`;
 
   h += gridMode==="score" ? gridScoreHtml(gridReleaseId,gridMemberId)
      : gridMode==="cost"  ? gridCostHtml(gridReleaseId)
+     : gridMode==="plan"  ? gridPlanHtml(gridReleaseId,gridMemberId)
      :                      gridHoldHtml(gridReleaseId,gridMemberId);
   el.innerHTML=h;
 }
@@ -1662,6 +1663,361 @@ function gridCell(eid,bu){
     <button class="btn ghost" style="width:100%;margin-top:16px" onclick="closeModals();openEvent('${e.id}')">「記録」で編集する</button>
   `, async()=>true);
   ["mOk","mCancel"].forEach(id=>{ const b=document.getElementById(id); if(b) b.style.display="none"; });
+}
+
+/* --- 応募モード ---
+   個別と全国/リアルでは作業そのものが違うので、同じ格子でも見せ方を変える。
+     個別      … 総枚数は規則で決まる(1部あたり × 最大部数 × セット数)。
+                 決めるのは「どの開催日のどの部に入れるか」だけ。人気メンバーは
+                 どうせ期待より少なくしか当たらないので枚数は最大で入れる。
+                 前の回次に入れた場所を薄く重ねて、同じ部を選びやすくする。
+     全国/リアル … 先に買った枚数がそのまま予算。まず開催日ごとに割り振り、
+                 その中で部ごとに配分する。「1部当たり」を開催日間で比べたい
+                 (例: 関東50枚を4部に、関西30枚は3部までにして1部当たりを揃える)。
+   組んだ内容は mg_plans に保存する。CDを注文する時点と申し込む時点がずれるため。 */
+let planType=null, planRound=1;
+
+// 回次ごとの申請上限。掛け算の形だけ固定し、数値はリリースごとに変えられる。
+function applyRuleOf(rid, round){
+  const list=(((byId(DB.releases,rid)||{}).config||{}).applyRules)||[];
+  const hit=list.find(x=>+x.round===+round);
+  const def = (+round===1) ? {perSession:3,maxSessions:15,sets:1}
+                           : {perSession:5,maxSessions:15,sets:5};
+  return Object.assign({round:+round},def,hit||{});
+}
+async function saveApplyRule(rid,round,field,v){
+  const r=byId(DB.releases,rid); if(!r) return;
+  const cfg=Object.assign({},r.config||{});
+  const list=(cfg.applyRules||[]).slice();
+  let hit=list.find(x=>+x.round===+round);
+  if(!hit){ hit=Object.assign({},applyRuleOf(rid,round)); list.push(hit); }
+  hit[field]=Math.max(1,+v||1);
+  cfg.applyRules=list; r.config=cfg;
+  await dbUpdate("releases",rid,{config:cfg});
+  renderGrid();
+}
+
+// その種別・その部の歴代当選率(打ち止め補正あり)。どこに入れるかの判断材料。
+function buRateOf(mid,type,bu){
+  const cap=typeRule(type).winCap;
+  let uA=0,uW=0,A=0,W=0;
+  DB.sessions.forEach(s=>{
+    if(s.bu_no!==bu) return;
+    const ev=byId(DB.events,s.event_id); if(!ev||ev.event_type!==type) return;
+    DB.applications.filter(a=>a.session_id===s.id&&a.member_id===mid&&!isComp(a)).forEach(a=>{
+      A+=a.applied||0; W+=a.won||0;
+      if(cap!=null&&(a.won||0)>=cap) return;
+      uA+=a.applied||0; uW+=a.won||0;
+    });
+  });
+  return uA ? uW/uA : (A ? W/A : null);
+}
+
+// 予算に対する過不足の色。不足は「まだ割り振っていない」なので警告どまり。
+const budCol=(v,b)=>!b?"":(v===b?"var(--ok)":(v>b?"var(--danger)":"var(--warn)"));
+
+/* 配分の集計。描画と再計算の両方から使う。 */
+function planAgg(rid,mid,type,round){
+  const p=planOf(rid,mid,type,round);
+  const rule=typeRule(type), cap=rule.winCap;
+  const evs=eventsOf(rid).filter(e=>e.event_type===type);
+  const buSet=new Set(); evs.forEach(e=>sessionsOf(e.id).forEach(s=>buSet.add(s.bu_no)));
+  const bus=[...buSet].sort((a,b)=>a-b);
+  const colSum={},colExp={},colN={},rowSum={}; let sum=0,exp=0,used=0;
+  bus.forEach(bu=>rowSum[bu]=0);
+  evs.forEach(e=>{colSum[e.id]=0;colExp[e.id]=0;colN[e.id]=0;});
+  evs.forEach(e=>bus.forEach(bu=>{
+    const v=planCell(p,e.id,bu); if(!v) return;
+    const rate=buRateOf(mid,type,bu);
+    let ex=rate?v*rate:0; if(cap!=null) ex=Math.min(ex,cap);
+    colSum[e.id]+=v; colExp[e.id]+=ex; colN[e.id]++; rowSum[bu]+=v; sum+=v; exp+=ex; used++;
+  }));
+  const budSum=Object.values(p.data.eventBudget).reduce((n,v)=>n+ +v,0);
+  return {p,rule,cap,evs,bus,colSum,colExp,colN,rowSum,sum,exp,used,budSum};
+}
+
+/* 入力のたびに表ごと描き直すと、スマホでは1マスごとにキーボードが閉じてしまう。
+   合計まわりだけを書き換える。 */
+function planRecalc(){
+  const box=document.getElementById("pl_grid"); if(!box){ renderGrid(); return; }
+  const a=planAgg(gridReleaseId,gridMemberId,planType,planRound);
+  const pre=a.rule.payment==="pre";
+  const set=(id,txt,col)=>{const el=document.getElementById(id); if(!el) return;
+    el.textContent=txt; if(col!==undefined) el.style.color=col;};
+  a.evs.forEach(e=>{
+    const b=+(a.p.data.eventBudget[e.id]||0);
+    set("pl_col_"+e.id, a.colSum[e.id]||"・", pre?budCol(a.colSum[e.id],b):"");
+    set("pl_avg_"+e.id, a.colN[e.id]?(a.colSum[e.id]/a.colN[e.id]).toFixed(1):"・");
+    set("pl_exp_"+e.id, a.colExp[e.id]?a.colExp[e.id].toFixed(1):"・");
+  });
+  a.bus.forEach(bu=>{
+    set("pl_row_"+bu, a.rowSum[bu]||"・");
+    const c=document.getElementById("pl_c_"+bu);            // 個別はセルの表示も更新する
+    if(c) c.textContent=a.rowSum[bu]||"・";
+  });
+  set("pl_sum", a.sum);
+  set("pl_expsum", a.exp.toFixed(1));
+  set("pl_avgsum", a.used?(a.sum/a.used).toFixed(1):"・");
+  set("pl_budsum", a.budSum+(a.p.budget?`/${a.p.budget}`:""), budCol(a.budSum,a.p.budget));
+  set("pl_hexp", a.exp.toFixed(1));
+  const ar=applyRuleOf(gridReleaseId,planRound);
+  const totalMax=pre?(a.p.budget||0):ar.perSession*ar.maxSessions*ar.sets;
+  set("pl_used", `${a.used}/${ar.maxSessions}`, a.used>ar.maxSessions?"var(--danger)":(a.used?"var(--ok)":"var(--txt3)"));
+  set("pl_total",`${a.sum}/${totalMax}`,      a.sum>totalMax    ?"var(--danger)":(a.sum?"var(--ok)":"var(--txt3)"));
+}
+
+function planOf(rid,mid,type,round){
+  let p=DB.plans.find(x=>x.release_id===rid&&x.member_id===mid&&x.event_type===type&&+x.round===+round);
+  if(!p){
+    p={id:null,release_id:rid,member_id:mid,event_type:type,round:+round,budget:null,data:{}};
+    DB.plans.push(p);
+  }
+  if(!p.data||typeof p.data!=="object") p.data={};
+  if(!p.data.cells) p.data.cells={};
+  if(!p.data.eventBudget) p.data.eventBudget={};
+  return p;
+}
+async function planSave(p){
+  const patch={budget:p.budget,data:p.data,updated_at:new Date().toISOString()};
+  if(p.id){ await dbUpdate("plans",p.id,patch); }
+  else{
+    const row=await dbInsert("plans",Object.assign(
+      {release_id:p.release_id,member_id:p.member_id,event_type:p.event_type,round:p.round},patch));
+    p.id=row.id;
+  }
+}
+const planCell=(p,eid,bu)=>+(p.data.cells[eid+":"+bu]||0);
+async function planSetCell(eid,bu,v){
+  const p=planOf(gridReleaseId,gridMemberId,planType,planRound);
+  const n=Math.max(0,+v||0);
+  if(n) p.data.cells[eid+":"+bu]=n; else delete p.data.cells[eid+":"+bu];
+  planRecalc(); await planSave(p);
+}
+async function planToggleCell(eid,bu,max){
+  const p=planOf(gridReleaseId,gridMemberId,planType,planRound);
+  const n=planCell(p,eid,bu)?0:max;
+  if(n) p.data.cells[eid+":"+bu]=n; else delete p.data.cells[eid+":"+bu];
+  const td=document.getElementById("pl_cell_"+eid+"_"+bu);
+  if(td){ td.querySelector(".pv").textContent = n||"・";
+          td.classList.toggle("has",!!n); td.classList.toggle("zero",!n); }
+  planRecalc(); await planSave(p);
+}
+async function planSetBudget(eid,v){
+  const p=planOf(gridReleaseId,gridMemberId,planType,planRound);
+  const n=Math.max(0,+v||0);
+  if(n) p.data.eventBudget[eid]=n; else delete p.data.eventBudget[eid];
+  planRecalc(); await planSave(p);
+}
+async function planSetTotal(v){
+  const p=planOf(gridReleaseId,gridMemberId,planType,planRound);
+  p.budget = String(v).trim()==="" ? null : Math.max(0,+v||0);
+  planRecalc(); await planSave(p);
+}
+
+/* 当選率の高い部から上限に届くまで埋める。上限に届いた先は期待値が増えないので、
+   これが一番取りこぼしが少ない。開催日ごとの予算の中で回す。 */
+async function planAuto(eid){
+  const p=planOf(gridReleaseId,gridMemberId,planType,planRound);
+  if(!eid){   // 予算の入っている開催日を全部まわす
+    const ids=Object.keys(p.data.eventBudget).filter(k=>+p.data.eventBudget[k]>0);
+    if(!ids.length){ toast("開催日ごとの予算を先に入れてください"); return; }
+    for(const id of ids) await planAuto(id);
+    return;
+  }
+  const rule=typeRule(planType), cap=rule.winCap;
+  let left=+(p.data.eventBudget[eid]||0);
+  if(!left) return;
+  const bus=sessionsOf(eid).map(s=>s.bu_no).sort((a,b)=>a-b);
+  const ranked=bus.map(bu=>({bu,rate:buRateOf(gridMemberId,planType,bu)}))
+                  .filter(x=>x.rate>0).sort((a,b)=>b.rate-a.rate);
+  bus.forEach(bu=>delete p.data.cells[eid+":"+bu]);
+  if(!ranked.length){ // 実績が無ければ均等に
+    const per=Math.floor(left/bus.length);
+    bus.forEach((bu,i)=>{ const v=per+(i<left-per*bus.length?1:0); if(v) p.data.cells[eid+":"+bu]=v; });
+  }else{
+    ranked.forEach(x=>{
+      if(left<=0) return;
+      const need = cap!=null ? Math.ceil(cap/x.rate) : left;   // 上限に届くのに要る枚数
+      const v=Math.min(need,left);
+      if(v>0){ p.data.cells[eid+":"+x.bu]=v; left-=v; }
+    });
+    if(left>0 && ranked.length) p.data.cells[eid+":"+ranked[0].bu]=(p.data.cells[eid+":"+ranked[0].bu]||0)+left;
+  }
+  renderGrid(); await planSave(p);
+  toast("当選率の高い部から配分しました");
+}
+
+/* 組んだ配分をそのまま申請として記録に流す。
+   申し込みを終えた時点で、この内容がそのまま申請枚数になるため。 */
+async function planCommit(){
+  const p=planOf(gridReleaseId,gridMemberId,planType,planRound);
+  const cells=Object.entries(p.data.cells).filter(([k,v])=>+v>0);
+  if(!cells.length){ toast("配分が入っていません"); return; }
+  const total=cells.reduce((n,[k,v])=>n+ +v,0);
+  if(!confirm(`${planRound}次の申請として ${cells.length}部 / 計${total}枚 を記録します。\n同じ部に既に${planRound}次の記録があれば上書きします。よろしいですか?`)) return;
+  let n=0;
+  for(const [k,v] of cells){
+    const [eid,bu]=k.split(":");
+    const s=sessionsOf(eid).find(x=>x.bu_no===+bu); if(!s) continue;
+    const ex=DB.applications.find(a=>a.session_id===s.id&&a.member_id===gridMemberId
+                                   &&+a.round===+planRound&&!isComp(a));
+    if(ex){ ex.applied=+v; await dbUpdate("applications",ex.id,{applied:+v}); }
+    else{
+      const row=await dbInsert("applications",{session_id:s.id,member_id:gridMemberId,
+        round:+planRound,applied:+v,won:0,kind:"lottery"});
+      DB.applications.push(row);
+    }
+    n++;
+  }
+  toast(`${n}部 の申請を記録しました`);
+  renderGrid();
+}
+
+function gridPlanHtml(rid, mid){
+  const all=eventsOf(rid);
+  if(!all.length) return `<div class="card"><div class="empty">このリリースにはまだ開催日がありません。</div></div>`;
+  if(!mid)        return `<div class="card"><div class="empty">対象メンバーがいません。</div></div>`;
+  const types=sortTypes([...new Set(all.map(e=>e.event_type))]);
+  if(!planType||!types.includes(planType)) planType=types[0];
+
+  // 回次の選択肢: 実績のある回次 + 次の回次
+  const rs=new Set([1]);
+  DB.plans.filter(x=>x.release_id===rid&&x.member_id===mid&&x.event_type===planType)
+          .forEach(x=>rs.add(+x.round));
+  all.filter(e=>e.event_type===planType).forEach(e=>sessionsOf(e.id).forEach(s=>DB.applications
+    .filter(a=>a.session_id===s.id&&a.member_id===mid&&!isComp(a)).forEach(a=>rs.add(+a.round))));
+  const rounds=[...rs].sort((a,b)=>a-b); rounds.push(rounds[rounds.length-1]+1);
+  if(!rounds.includes(+planRound)) planRound=rounds[0];
+
+  const a=planAgg(rid,mid,planType,planRound);
+  const {p,rule,cap,evs,bus,colSum,colExp,colN,rowSum,sum,exp,used,budSum}=a;
+  const pre=rule.payment==="pre";
+  const ar=applyRuleOf(rid,planRound);
+  const cellMax = pre ? null : ar.perSession*ar.sets;
+  const totalMax= pre ? (p.budget||0) : ar.perSession*ar.maxSessions*ar.sets;
+
+  // 前の回次に入れた場所(個別の判断材料)
+  const prevApplied=(eid,bu)=>{
+    if(planRound<=1) return 0;
+    const s=sessionsOf(eid).find(x=>x.bu_no===bu); if(!s) return 0;
+    const ap=DB.applications.find(x=>x.session_id===s.id&&x.member_id===mid
+                                   &&+x.round===planRound-1&&!isComp(x));
+    return ap?(ap.applied||0):0;
+  };
+  const gap=i=>{
+    if(i===0) return "";
+    const d=(new Date(evs[i].event_date+"T00:00:00")-new Date(evs[i-1].event_date+"T00:00:00"))/86400000;
+    return `+${Math.round(d)}日`;
+  };
+
+  let h=`<div class="card">
+    <div class="grid2" style="margin-bottom:10px">
+      <div class="field" style="margin:0"><label class="fld">種別</label>
+        <select onchange="planType=this.value;renderGrid()">
+          ${types.map(t=>`<option value="${t}" ${t===planType?"selected":""}>${esc(typeLabel(t))}</option>`).join("")}
+        </select></div>
+      <div class="field" style="margin:0"><label class="fld">回次</label>
+        <select onchange="planRound=+this.value;renderGrid()">
+          ${rounds.map(r=>`<option value="${r}" ${r===+planRound?"selected":""}>${r}次</option>`).join("")}
+        </select></div>
+    </div>`;
+
+  if(pre){
+    // 先払い: 先に買った枚数がそのまま予算。前回の実績を横に出して判断材料にする。
+    const prev=prevRelease(rid), pc=prev?releaseCost(prev.id):null;
+    h+=`<div class="row" style="gap:10px;align-items:flex-end">
+      <div class="field" style="margin:0;width:112px"><label class="fld">総予算(枚)</label>
+        <input type="number" min="0" value="${p.budget??""}" placeholder="150"
+          style="text-align:right;padding:7px 9px" onchange="planSetTotal(this.value)"></div>
+      <div class="grow dim" style="font-size:11px;padding-bottom:8px;line-height:1.7">
+        ${pc&&pc.zenQty?`前回 ${pc.zenQty}枚<br>`:""}期待当選 <b id="pl_hexp" style="color:var(--acc)">${exp.toFixed(1)}</b>枚
+      </div></div>
+    <p class="dim" style="font-size:11px;margin:8px 0 0">先に買った枚数がそのまま予算です。まず開催日ごとに割り振り、その中で部ごとに配分します。</p>`;
+  }else{
+    // 後払い: 総枚数は規則で決まる。数値はリリースごとに変えられる。
+    const ni=(f,v)=>`<input type="number" min="1" value="${v}" style="width:44px;text-align:center;padding:4px;font-size:13px"
+        onchange="saveApplyRule('${rid}',${planRound},'${f}',this.value)">`;
+    h+=`<div class="row" style="gap:4px;font-size:11px">
+      <span class="dim">1部</span>${ni("perSession",ar.perSession)}<span class="dim">枚 ×</span>
+      ${ni("maxSessions",ar.maxSessions)}<span class="dim">部 ×</span>
+      ${ni("sets",ar.sets)}<span class="dim">セット</span>
+      <span class="grow"></span><span style="font-weight:700;font-size:13px">= ${totalMax}枚</span></div>
+    <div class="row" style="margin-top:10px;font-size:13px">
+      <span class="dim">部</span><span id="pl_used" style="font-weight:700;margin-left:6px">${used}/${ar.maxSessions}</span>
+      <span class="dim" style="margin-left:16px">枚数</span><span id="pl_total" style="font-weight:700;margin-left:6px">${sum}/${totalMax}</span>
+      <span class="grow"></span>
+      <span class="dim" style="font-size:12px">期待当選 <b id="pl_hexp" style="color:var(--acc)">${exp.toFixed(1)}</b>枚</span></div>
+    <p class="dim" style="font-size:11px;margin:8px 0 0">セルをタップすると 0 ⇄ ${cellMax}枚 が切り替わります。${planRound>1?` 右上の小さい数字は ${planRound-1}次に入れた枚数です。`:""}</p>`;
+  }
+  h+=`</div>`;
+
+  // --- 格子 ---
+  h+=`<div class="card" id="pl_grid"><div class="gridwrap"><table class="mg"><thead><tr><th class="stick"></th>`;
+  evs.forEach((e,i)=>{
+    const {md,wd,cls}=mdw(e.event_date);
+    h+=`<th class="dt" title="${esc(e.venue||"")}">${md}<span class="${cls}">${wd}</span>`
+     + (pre&&e.venue?`<span class="wd" style="color:var(--txt3)">${esc(e.venue.slice(0,4))}</span>`:"")
+     + (gap(i)?`<span class="wd" style="color:var(--txt3)">${gap(i)}</span>`:"")
+     + `</th>`;
+  });
+  h+=`<th class="tot">計</th></tr></thead><tbody>`;
+
+  if(pre){
+    h+=`<tr><td class="stick" style="font-size:12px">予算</td>`;
+    evs.forEach(e=>h+=`<td style="padding:4px"><input type="number" min="0" value="${p.data.eventBudget[e.id]??""}" placeholder="0"
+        style="width:54px;text-align:center;padding:5px;font-size:13px" onchange="planSetBudget('${e.id}',this.value)"></td>`);
+    h+=`<td class="tot" id="pl_budsum" style="font-weight:700;color:${budCol(budSum,p.budget)||"var(--ok)"}">${budSum}${p.budget?`/${p.budget}`:""}</td></tr>`;
+  }
+
+  bus.forEach(bu=>{
+    const rate=buRateOf(mid,planType,bu);
+    h+=`<tr><td class="stick"><span class="buchip" style="background:${buColor(bu)}"></span>${bu}部
+      <span class="butime">${rate!=null?Math.round(rate*100)+"%":"—"}</span></td>`;
+    evs.forEach(e=>{
+      if(!sessionsOf(e.id).some(s=>s.bu_no===bu)){ h+=`<td class="zero">–</td>`; return; }
+      const v=planCell(p,e.id,bu);
+      const tint = rate!=null ? `background:rgba(79,178,134,${(rate*0.30).toFixed(3)});` : "";
+      if(pre){
+        h+=`<td style="${tint}padding:4px"><input type="number" min="0" value="${v||""}" placeholder="0"
+            style="width:54px;text-align:center;padding:5px;font-size:13px;background:transparent"
+            onchange="planSetCell('${e.id}',${bu},this.value)"></td>`;
+      }else{
+        const pv=prevApplied(e.id,bu);
+        h+=`<td class="cell ${v?"has":"zero"}" id="pl_cell_${e.id}_${bu}" style="${tint}"
+              onclick="planToggleCell('${e.id}',${bu},${cellMax})"><span class="pv">${v||"・"}</span>`
+         + (pv?`<span class="prevq">${pv}</span>`:"") + `</td>`;
+      }
+    });
+    h+=`<td class="tot ${rowSum[bu]?"has":"zero"}" id="pl_row_${bu}">${rowSum[bu]||"・"}</td></tr>`;
+  });
+
+  h+=`<tr class="sum"><td class="stick">配分</td>`;
+  evs.forEach(e=>{
+    const b=+(p.data.eventBudget[e.id]||0);
+    const col = pre?budCol(colSum[e.id],b):"";
+    h+=`<td id="pl_col_${e.id}" style="${col?`color:${col}`:""}">${colSum[e.id]||"・"}</td>`;
+  });
+  h+=`<td class="tot" id="pl_sum" style="color:var(--acc)">${sum}</td></tr>`;
+
+  if(pre){
+    h+=`<tr class="sum"><td class="stick" style="font-size:11px">1部当たり</td>`;
+    evs.forEach(e=>h+=`<td class="dim" id="pl_avg_${e.id}" style="font-weight:600">${colN[e.id]?(colSum[e.id]/colN[e.id]).toFixed(1):"・"}</td>`);
+    h+=`<td class="tot dim" id="pl_avgsum">${used?(sum/used).toFixed(1):"・"}</td></tr>`;
+  }
+  h+=`<tr class="sum"><td class="stick" style="font-size:11px">期待当選</td>`;
+  evs.forEach(e=>h+=`<td class="dim" id="pl_exp_${e.id}" style="font-weight:600">${colExp[e.id]?colExp[e.id].toFixed(1):"・"}</td>`);
+  h+=`<td class="tot" id="pl_expsum" style="color:var(--acc)">${exp.toFixed(1)}</td></tr>`;
+  h+=`</tbody></table></div>`;
+
+  h+=`<div class="row" style="gap:8px;margin-top:12px;flex-wrap:wrap">
+    ${pre?`<button class="btn sm ghost" onclick="planAuto('')">当選率の高い部から配分</button>`:""}
+    <button class="btn sm primary" style="margin-left:auto" onclick="planCommit()">${planRound}次の申請として記録</button>
+  </div>
+  <p class="dim" style="font-size:11px;margin:10px 0 0;line-height:1.7">
+    セルの緑の濃さはその部の歴代当選率です。日付の下は${pre?"会場と、":""}前の開催からの間隔。
+    ${cap!=null?`この種別は1部あたり当選 ${cap}枚 が上限なので、期待当選はそこで頭打ちになります。`:""}
+    内容は自動で保存されます。</p></div>`;
+  return h;
 }
 
 /* --- 費用モード ---
@@ -1859,14 +2215,6 @@ function statsTypesOfMember(mid){
   });
   return sortTypes([...set]);
 }
-// そのメンバーの所属グループに「イベントが存在する」種別一覧(シミュ用)。表示順でソート。
-function simTypesOfMember(mid){
-  const m=byId(DB.members,mid); if(!m) return [];
-  const relIds=DB.releases.filter(r=>r.group_id===m.group_id).map(r=>r.id);
-  const set=new Set();
-  DB.events.filter(e=>relIds.includes(e.release_id)).forEach(e=>set.add(e.event_type));
-  return sortTypes([...set]);
-}
 function renderStats(){
   const el=$("#tab-stats");
   const cand=membersWithData();
@@ -1988,174 +2336,6 @@ function renderStats(){
   });
   html+=`</div>`;
   el.innerHTML=html;
-}
-
-/* =========================================================================
-   TAB 4: 応募計算(シミュレーション)
-   対象メンバーを選び、各部に応募枚数を割り振り、そのメンバーの
-   歴代当選率から期待当選を試算する。
-   ========================================================================= */
-let simMemberId=null, simRound=1, simType=null;
-function availableRounds(mid){
-  // そのメンバーの応募データに存在する回次(なければ1〜2)
-  const rs=[...new Set(DB.applications.filter(a=>a.member_id===mid).map(a=>a.round))].sort((a,b)=>a-b);
-  return rs.length?rs:[1,2];
-}
-function renderSim(){
-  const el=$("#tab-sim");
-  const cand=membersWithData();
-  if(!simMemberId || !cand.some(m=>m.id===simMemberId)){
-    simMemberId=(cand.find(m=>m.is_oshi)?.id)||(cand[0]?.id)||null;
-    simType=null;   // メンバーが変わったら種別も再決定
-  }
-  const rounds=simMemberId?availableRounds(simMemberId):[1,2];
-  if(!rounds.includes(simRound)) simRound=rounds[0];
-  // このメンバーの所属グループにイベントが存在する種別(表示順)。既定は先頭。
-  const types=simMemberId?simTypesOfMember(simMemberId):[];
-  if(!simType || !types.includes(simType)) simType=types[0]||null;
-
-  let html=`<h2 style="font-size:19px;margin:6px 0 8px">応募シミュレーション</h2>
-    <p class="dim" style="font-size:13px;margin:0 0 14px">対象メンバー・応募回次・種別を選び、各部に応募枚数を入れると、その回次の歴代当選率から期待当選を試算します。</p>`;
-
-  html+=`<div class="card">
-    <div class="field"><label class="fld">対象メンバー</label>
-      <select id="simMember" onchange="simMemberId=this.value;renderSim()">
-        ${(cand.length?cand:DB.members).map(m=>`<option value="${m.id}" ${m.id===simMemberId?"selected":""}>${esc(m.name)}${m.is_oshi?" ★":""}</option>`).join("")}
-      </select></div>
-    <div class="grid2">
-      <div class="field" style="margin-bottom:0"><label class="fld">応募回次</label>
-        <select id="simRound" onchange="simRound=+this.value;simBuild()">
-          ${rounds.map(r=>`<option value="${r}" ${r===simRound?"selected":""}>${r}次</option>`).join("")}</select></div>
-      <div class="field" style="margin-bottom:0"><label class="fld">種別</label>
-        <select id="simType" onchange="simType=this.value;simBuild()">
-          ${types.length?types.map(k=>`<option value="${k}" ${simType===k?"selected":""}>${esc(typeLabel(k))}</option>`).join("")
-              :`<option value="">(イベントなし)</option>`}</select></div>
-    </div>
-    <div id="simRows" style="margin-top:12px"></div>
-    <div class="grid3" style="margin-top:14px">
-      ${miniStat("応募 合計","<span id='simApp'>0</span>枚")}
-      ${miniStat("期待当選","<span id='simExp'>0.0</span>枚")}
-      ${miniStat("期待当選率","<span id='simRate'>—</span>")}
-    </div>
-    <div class="row" id="simWasteBox" style="display:none;margin-top:12px;padding:10px 12px;background:var(--dangerbg);border-radius:10px">
-      <span style="font-size:12px;color:var(--danger)">上限を超えて入れた分</span>
-      <span class="grow"></span>
-      <span id="simWaste" style="font-weight:700;color:var(--danger)">—</span>
-    </div>
-    <p class="dim" style="font-size:11px;margin:10px 0 0" id="simNote">当選率は選択メンバー・選択種別・選択回次の歴代実績(その部の実データ)のみで算出します。データの無い部は「データなし」と表示し、合計・期待当選の計算からは除外します。確率の目安です。</p>
-  </div>`;
-  el.innerHTML=html;
-  simBuild();
-}
-function simBuild(){
-  const type=($("#simType")||{}).value||simType;
-  const box=$("#simRows"); if(!box) return;
-  if(!type){ box.innerHTML=`<div class="empty" style="padding:20px">このメンバーの所属グループにイベントがありません。</div>`; simCalc(); return; }
-  // 種別ごとの制度(当選上限・単価・支払いの向き)
-  const rule=typeRule(type), cap=rule.winCap;
-
-  // 選択メンバー × 選択種別 × 選択回次 の「部」別当選率を集計(種別で完全に分離)
-  // 各部の代表時刻も保持(カスタムは実データの時刻を使うため)。
-  const byBu={};
-  if(simMemberId){
-    DB.sessions.forEach(s=>{
-      const ev=byId(DB.events,s.event_id); if(!ev) return;
-      if(ev.event_type!==type) return;                 // ★種別フィルタ(他種別を混ぜない)
-      DB.applications.filter(a=>a.session_id===s.id && a.member_id===simMemberId && a.round===simRound && !isComp(a)).forEach(a=>{
-        const v=(byBu[s.bu_no]=byBu[s.bu_no]||{applied:0,won:0,cap:0,uApplied:0,uWon:0,times:{}});
-        v.applied+=a.applied||0; v.won+=a.won||0;
-        // 当選率タブと同じ補正: 上限に届いた回は率の計算から外す
-        if(cap!=null && (a.won||0)>=cap) v.cap++;
-        else { v.uApplied+=a.applied||0; v.uWon+=a.won||0; }
-        const t=s.start_time.slice(0,5); v.times[t]=(v.times[t]||0)+1;
-      });
-    });
-  }
-  const repTime=v=>{ const e=Object.entries(v.times||{}); return e.length?e.sort((a,b)=>b[1]-a[1])[0][0]:""; };
-
-  // 行(部)の構成:
-  //  - 標準種別: TEMPLATESの固定スケジュール
-  //  - ユーザー定義カスタム種別(ct_xxx): そのテンプレの部構成
-  //  - 旧"custom": テンプレが無いので、実際に応募した部のみを実データから構成
-  let rowsSpec;
-  const ct=customTypeById(type);
-  if(ct){
-    rowsSpec=ct.sessions.map((s,i)=>({bu_no:i+1, k:s.start_time.slice(0,5)}));
-  }else if(type==="custom"){
-    rowsSpec=Object.keys(byBu).map(Number).sort((a,b)=>a-b)
-      .map(bu=>({bu_no:bu, k:repTime(byBu[bu])}));
-    if(!rowsSpec.length){
-      box.innerHTML=`<div class="empty" style="padding:20px">この回次のカスタム応募データがありません。<br>「記録」で申請・当選を入力すると試算できます。</div>`;
-      simCalc(); return;
-    }
-  }else{
-    rowsSpec=buildSchedule(TEMPLATES[type]||TEMPLATES.kojin_online).map(s=>({bu_no:s.bu_no, k:s.start_time.slice(0,5)}));
-  }
-
-  box.dataset.payment=rule.payment||"post";
-  box.dataset.unit=rule.unitPrice||0;
-  const wb=$("#simWasteBox"); if(wb) wb.style.display=(cap!=null&&rule.payment==="pre")?"":"none";
-  const note=$("#simNote");
-  if(note) note.textContent = cap!=null
-    ? `この種別は1部あたり当選 ${cap}枚 が上限です。上限に届くのに要る枚数を「目安」として出し、それを超えた分は当選に繋がりません`
-      + (rule.payment==="pre"?"(先払いなので、そのまま無駄になります)。":"。")
-      + " 当選率は選択メンバー・種別・回次の実績のみで算出します。"
-    : "当選率は選択メンバー・選択種別・選択回次の歴代実績(その部の実データ)のみで算出します。データの無い部は「データなし」と表示し、合計・期待当選の計算からは除外します。確率の目安です。";
-
-  box.innerHTML=rowsSpec.map((s)=>{
-    const k=s.k;
-    const v=byBu[s.bu_no];
-    const hasData = !!(v && v.applied);
-    const rate = !hasData ? null : (v.uApplied ? v.uWon/v.uApplied : v.won/v.applied);
-    if(!hasData){
-      return `<div class="simrow" style="border-bottom:1px solid var(--line);opacity:.65" data-nodata="1">
-        <div class="row" style="padding:9px 0;gap:10px">
-          <div style="width:70px"><div style="font-weight:600">${s.bu_no}部</div><div class="dim" style="font-size:11px">${k}</div></div>
-          <input type="number" min="0" value="3" style="width:62px;text-align:center;padding:6px" disabled class="simInput">
-          <span style="font-size:12px;color:var(--txt3);width:104px">データなし</span>
-          <span class="grow" style="text-align:right;font-weight:700;color:var(--txt3)">期待 —</span>
-        </div></div>`;
-    }
-    const col=rate>=.5?'var(--ok)':rate>=.3?'var(--warn)':'var(--danger)';
-    const need=needForCap(rate,cap);
-    return `<div class="simrow" style="border-bottom:1px solid var(--line)"
-                 data-rate="${rate}" data-cap="${cap??""}" data-need="${need??""}">
-      <div class="row" style="padding:9px 0 ${need!=null?"2px":"9px"};gap:10px">
-        <div style="width:70px"><div style="font-weight:600">${s.bu_no}部</div><div class="dim" style="font-size:11px">${k}</div></div>
-        <input type="number" min="0" value="3" style="width:62px;text-align:center;padding:6px" oninput="simCalc()" class="simInput">
-        <span style="font-size:12px;color:${col};width:104px">当選率 ${Math.round(rate*100)}%</span>
-        <span class="grow" style="text-align:right;font-weight:700">期待 <span class="expCell">0.0</span></span>
-      </div>
-      ${need!=null?`<div class="hint dim" style="font-size:11px;padding:0 0 8px 80px"></div>`:""}
-    </div>`;
-  }).join("");
-  simCalc();
-}
-function simCalc(){
-  const box=$("#simRows"); if(!box) return;
-  const pay=box.dataset.payment, unit=+box.dataset.unit||0;
-  let totA=0,totE=0,totOver=0;
-  box.querySelectorAll(".simrow").forEach(r=>{
-    if(r.dataset.nodata) return;                  // データなしの部は合計に含めない
-    const rate=+r.dataset.rate;
-    const cap =r.dataset.cap ==="" ? null : +r.dataset.cap;
-    const need=r.dataset.need==="" ? null : +r.dataset.need;
-    const v=+r.querySelector(".simInput").value||0;
-    let e=v*rate;
-    if(cap!=null) e=Math.min(e,cap);              // 制度上ありえない期待値を出さない
-    totA+=v; totE+=e;
-    r.querySelector(".expCell").textContent=e.toFixed(1);
-    const over=(need!=null && v>need) ? v-need : 0;
-    totOver+=over;
-    const hint=r.querySelector(".hint");
-    if(hint&&need!=null) hint.innerHTML=`上限 ${cap}枚 ・ 目安 ${need}枚で到達`
-      + (over?` ・ <span style="color:var(--danger);font-weight:600">過剰 ${over}枚</span>`:"");
-  });
-  $("#simApp").textContent=totA;
-  $("#simExp").textContent=totE.toFixed(1);
-  $("#simRate").textContent=totA?Math.round(totE/totA*100)+"%":"—";
-  const w=$("#simWaste");
-  if(w) w.textContent = totOver ? (pay==="pre"&&unit ? `${totOver}枚 ・ ${yen(totOver*unit)}` : `${totOver}枚`) : "なし";
 }
 
 /* =========================================================================
@@ -2306,7 +2486,7 @@ async function deleteGroup(id){
   DB.groups=DB.groups.filter(x=>x.id!==id);
   // 選択中の状態が消えた可能性 → リセット
   selectedReleaseId=null; selectedEventId=null; detailMemberId=null;
-  statsMemberId=null; simMemberId=null;
+  statsMemberId=null; gridMemberId=null; gridReleaseId=null;
   toast("グループを削除しました");
   refreshDataEditor();
 }
